@@ -1,41 +1,41 @@
 import "./style.css";
 
-type InspectorControl = {
+type ControlTile = {
   title: string;
   value: string;
   note: string;
 };
 
-const inspectorControls: InspectorControl[] = [
+const controlTiles: ControlTile[] = [
   {
     title: "Time",
-    value: "Start 00:00 / End 00:00",
-    note: "Trim controls"
+    value: "00:00 - 00:00",
+    note: "Trim range"
   },
   {
     title: "Crop",
     value: "Full frame",
-    note: "Numeric crop"
+    note: "Area"
   },
   {
     title: "Size",
     value: "Original",
-    note: "Resize"
+    note: "Scale"
   },
   {
-    title: "Frame rate",
+    title: "FPS",
     value: "Original",
-    note: "FPS tuning"
+    note: "Frame rate"
   },
   {
     title: "Audio",
-    value: "Keep audio",
-    note: "Audio mode"
+    value: "Keep",
+    note: "Mode"
   },
   {
     title: "Combine",
-    value: "Single source",
-    note: "Later milestone"
+    value: "Single",
+    note: "Source"
   }
 ];
 
@@ -49,7 +49,6 @@ root.innerHTML = `
   <div class="app-shell">
     <header class="app-header">
       <div class="brand-lockup">
-        <p class="eyebrow">WATLAB Tools</p>
         <h1 class="brand-wordmark">FrameTuner</h1>
         <p class="app-copy">Browser-based video trimming and tuning tool.</p>
       </div>
@@ -60,69 +59,58 @@ root.innerHTML = `
     </header>
 
     <main class="workspace" aria-label="FrameTuner workspace">
-      <div class="media-column">
-        <section class="panel upload-panel" aria-labelledby="upload-title">
-          <div class="panel-heading">
-            <div>
-              <p class="section-kicker">Source</p>
-              <h2 id="upload-title">Upload</h2>
-            </div>
-            <span class="status-pill">Local-first</span>
+      <section class="panel media-panel" aria-labelledby="preview-title">
+        <div class="upload-bar" tabindex="0" aria-label="Video file drop area">
+          <div class="upload-copy">
+            <span class="section-kicker">Source</span>
+            <strong>Drop a video file here</strong>
+            <span>Your video stays in this browser.</span>
           </div>
-          <div class="drop-zone" tabindex="0" aria-label="Video file drop area">
-            <span class="drop-mark" aria-hidden="true">+</span>
-            <div>
-              <p class="drop-title">Drop a video file here</p>
-              <p class="drop-copy">Your video stays in this browser.</p>
-            </div>
-            <button class="button primary" type="button" disabled>
-              Choose file
-            </button>
-          </div>
-          <p class="message">
-            File loading will be connected in Milestone 2. Core editing stays local and static-host friendly.
-          </p>
-        </section>
+          <button class="button primary compact-button" type="button" disabled>
+            Choose file
+          </button>
+        </div>
 
-        <section class="panel preview-panel" aria-labelledby="preview-title">
-          <div class="panel-heading">
-            <div>
-              <p class="section-kicker">Preview</p>
-              <h2 id="preview-title">Video preview</h2>
-            </div>
-            <span class="status-pill status-pill-muted">Empty</span>
-          </div>
-          <div class="video-frame" aria-label="Preview area">
-            <div class="video-placeholder">
-              <span class="preview-monogram" aria-hidden="true">FT</span>
-              <p>Load a short clip to preview it here.</p>
-            </div>
-          </div>
-          <div class="player-controls" aria-label="Player controls">
-            <button class="button" type="button" disabled>Play</button>
-            <label class="seek-control">
-              <span>Seek</span>
-              <input type="range" min="0" max="100" value="0" disabled />
-            </label>
-            <span class="time-readout">00:00 / 00:00</span>
-            <button class="button" type="button" disabled>Mute</button>
-          </div>
-        </section>
-      </div>
-
-      <aside class="panel inspector-panel" aria-labelledby="inspector-title">
-        <div class="panel-heading">
+        <div class="preview-header">
           <div>
-            <p class="section-kicker">Inspector</p>
-            <h2 id="inspector-title">Edit controls</h2>
+            <span class="section-kicker">Preview</span>
+            <h2 id="preview-title">Video preview</h2>
+          </div>
+          <span class="status-pill status-pill-muted">Empty</span>
+        </div>
+
+        <div class="video-frame" aria-label="Preview area">
+          <div class="video-placeholder">
+            <span class="preview-monogram" aria-hidden="true">FT</span>
+            <p>Load a short clip to preview it here.</p>
+          </div>
+        </div>
+
+        <div class="player-controls" aria-label="Player controls">
+          <button class="button" type="button" disabled>Play</button>
+          <label class="seek-control">
+            <span>Seek</span>
+            <input type="range" min="0" max="100" value="0" disabled />
+          </label>
+          <span class="time-readout">00:00 / 00:00</span>
+          <button class="button" type="button" disabled>Mute</button>
+        </div>
+      </section>
+
+      <aside class="panel control-panel" aria-labelledby="controls-title">
+        <div class="panel-heading compact-heading">
+          <div>
+            <span class="section-kicker">Inspector</span>
+            <h2 id="controls-title">Edit controls</h2>
           </div>
           <span class="status-pill status-pill-muted">Idle</span>
         </div>
-        <div class="control-list">
-          ${inspectorControls
+
+        <div class="control-grid">
+          ${controlTiles
             .map(
               (control) => `
-                <div class="control-row">
+                <div class="control-tile">
                   <div>
                     <h3>${control.title}</h3>
                     <p>${control.note}</p>
@@ -133,48 +121,51 @@ root.innerHTML = `
             )
             .join("")}
         </div>
-        <div class="inspector-actions">
+
+        <div class="quick-actions" aria-label="History controls">
           <button class="button" type="button" disabled>Undo</button>
           <button class="button" type="button" disabled>Reset</button>
         </div>
-      </aside>
 
-      <section class="panel export-panel workspace-wide" aria-labelledby="export-title">
-        <div class="panel-heading">
-          <div>
-            <p class="section-kicker">Output</p>
-            <h2 id="export-title">Export</h2>
+        <section class="export-strip" aria-labelledby="export-title">
+          <div class="export-heading">
+            <div>
+              <span class="section-kicker">Output</span>
+              <h2 id="export-title">Export</h2>
+            </div>
+            <span class="status-pill status-pill-muted">Not ready</span>
           </div>
-          <span class="status-pill status-pill-muted">Not ready</span>
-        </div>
-        <div class="export-grid">
-          <label>
-            <span>Format</span>
-            <select disabled>
-              <option>MP4</option>
-            </select>
-          </label>
-          <label>
-            <span>Quality</span>
-            <select disabled>
-              <option>Standard</option>
-            </select>
-          </label>
-          <label>
-            <span>Audio</span>
-            <select disabled>
-              <option>Keep audio</option>
-            </select>
-          </label>
-          <button class="button primary export-button" type="button" disabled>
-            Export video
-          </button>
-        </div>
-        <div class="progress-shell" aria-label="Export progress">
-          <span class="progress-bar" style="width: 0%"></span>
-        </div>
-        <p class="message">Waiting for a source video.</p>
-      </section>
+
+          <div class="export-grid">
+            <label>
+              <span>Format</span>
+              <select disabled>
+                <option>MP4</option>
+              </select>
+            </label>
+            <label>
+              <span>Quality</span>
+              <select disabled>
+                <option>Standard</option>
+              </select>
+            </label>
+            <label>
+              <span>Audio</span>
+              <select disabled>
+                <option>Keep audio</option>
+              </select>
+            </label>
+            <button class="button primary export-button" type="button" disabled>
+              Export video
+            </button>
+          </div>
+
+          <div class="progress-shell" aria-label="Export progress">
+            <span class="progress-bar" style="width: 0%"></span>
+          </div>
+          <p class="message">Waiting for a source video.</p>
+        </section>
+      </aside>
     </main>
   </div>
 `;
