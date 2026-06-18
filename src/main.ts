@@ -235,22 +235,6 @@ root.innerHTML = `
             />
           </div>
 
-          <div class="trim-fields">
-            <label>
-              <span>Start</span>
-              <input type="number" min="0" value="0" step="0.1" data-trim-start-input disabled />
-            </label>
-            <label>
-              <span>End</span>
-              <input type="number" min="0" value="0" step="0.1" data-trim-end-input disabled />
-            </label>
-          </div>
-
-          <div class="trim-actions">
-            <button class="button" type="button" data-set-trim-start disabled>Set start</button>
-            <button class="button" type="button" data-set-trim-end disabled>Set end</button>
-          </div>
-
           <p class="trim-message" data-trim-message>Load a video to choose a time range.</p>
         </section>
 
@@ -340,8 +324,6 @@ const metaSize = query<HTMLElement>("[data-meta-size]");
 const trimSlider = query<HTMLDivElement>("[data-trim-slider]");
 const trimStartRange = query<HTMLInputElement>("[data-trim-start-range]");
 const trimEndRange = query<HTMLInputElement>("[data-trim-end-range]");
-const trimStartInput = query<HTMLInputElement>("[data-trim-start-input]");
-const trimEndInput = query<HTMLInputElement>("[data-trim-end-input]");
 const trimSummary = query<HTMLElement>("[data-trim-summary]");
 const trimMessage = query<HTMLElement>("[data-trim-message]");
 const trimFilmstrip = query<HTMLDivElement>("[data-trim-filmstrip]");
@@ -350,8 +332,6 @@ const trimStartMarkerTime = query<HTMLElement>("[data-trim-start-marker-time]");
 const trimEndMarkerTime = query<HTMLElement>("[data-trim-end-marker-time]");
 const trimActiveLabel = query<HTMLElement>("[data-trim-active-label]");
 const trimActiveTime = query<HTMLElement>("[data-trim-active-time]");
-const setTrimStartButton = query<HTMLButtonElement>("[data-set-trim-start]");
-const setTrimEndButton = query<HTMLButtonElement>("[data-set-trim-end]");
 let trimFilmstripHideTimer: number | null = null;
 
 chooseFileButton.addEventListener("click", () => fileInput.click());
@@ -448,22 +428,6 @@ seekInput.addEventListener("input", () => {
 
 bindTrimRangeEvents(trimStartRange, "start");
 bindTrimRangeEvents(trimEndRange, "end");
-
-trimStartInput.addEventListener("change", () => {
-  setTrimRange(Number(trimStartInput.value), state.trimEnd, "start");
-});
-
-trimEndInput.addEventListener("change", () => {
-  setTrimRange(state.trimStart, Number(trimEndInput.value), "end");
-});
-
-setTrimStartButton.addEventListener("click", () => {
-  setTrimRange(video.currentTime, state.trimEnd, "start");
-});
-
-setTrimEndButton.addEventListener("click", () => {
-  setTrimRange(state.trimStart, video.currentTime, "end");
-});
 
 resetSourceButton.addEventListener("click", resetSource);
 
@@ -684,13 +648,6 @@ function renderTrimUi(): void {
 
   trimStartRange.value = enabled ? String(timeToSliderValue(state.trimStart)) : "0";
   trimEndRange.value = enabled ? String(timeToSliderValue(state.trimEnd)) : String(TRIM_SLIDER_MAX);
-  trimStartInput.value = enabled ? formatSecondsInput(state.trimStart) : "0";
-  trimEndInput.value = enabled ? formatSecondsInput(state.trimEnd) : "0";
-
-  trimStartInput.max = enabled ? formatSecondsInput(Math.max(0, duration - MIN_TRIM_SECONDS)) : "0";
-  trimEndInput.max = enabled ? formatSecondsInput(duration) : "0";
-  trimStartInput.step = "0.1";
-  trimEndInput.step = "0.1";
 
   const startPercent = enabled ? (state.trimStart / duration) * 100 : 0;
   const endPercent = enabled ? (state.trimEnd / duration) * 100 : 100;
@@ -709,10 +666,6 @@ function renderTrimUi(): void {
 function setTrimControlsEnabled(enabled: boolean): void {
   trimStartRange.disabled = !enabled;
   trimEndRange.disabled = !enabled;
-  trimStartInput.disabled = !enabled;
-  trimEndInput.disabled = !enabled;
-  setTrimStartButton.disabled = !enabled;
-  setTrimEndButton.disabled = !enabled;
 }
 
 async function generateTrimThumbnails(): Promise<void> {

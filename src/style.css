@@ -806,33 +806,6 @@ input:disabled {
   cursor: not-allowed;
 }
 
-.trim-fields,
-.trim-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.trim-fields label {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-  color: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 800;
-}
-
-.trim-fields input {
-  width: 100%;
-  min-height: 31px;
-  border: 1px solid rgba(141, 189, 255, 0.22);
-  border-radius: 9px;
-  padding: 6px 8px;
-  color: var(--text);
-  background: var(--surface-subtle);
-  font-size: 0.8rem;
-}
-
 .trim-message {
   margin: 0;
   color: var(--muted);
@@ -1185,17 +1158,6 @@ input:disabled {
   .trim-heading > span,
   .trim-message {
     font-size: 0.68rem;
-  }
-
-  .trim-fields,
-  .trim-actions {
-    gap: 6px;
-  }
-
-  .trim-fields input {
-    min-height: 31px;
-    padding: 5px 6px;
-    font-size: 0.74rem;
   }
 
   .control-tile {
