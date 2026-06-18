@@ -29,6 +29,33 @@ const TRIM_THUMBNAIL_WIDTH = 160;
 const TRIM_THUMBNAIL_HEIGHT = 90;
 const TRIM_FILMSTRIP_HIDE_DELAY_MS = 180;
 
+const PLAYER_ICONS = {
+  play: `
+    <svg class="player-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <path d="M10 7.5v17l15-8.5-15-8.5Z" />
+    </svg>
+  `,
+  pause: `
+    <svg class="player-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <path d="M10 7h4.8v18H10V7Zm7.2 0H22v18h-4.8V7Z" />
+    </svg>
+  `,
+  volume: `
+    <svg class="player-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <path d="M5.5 12.2v7.6h5.1L17.5 26V6l-6.9 6.2H5.5Z" />
+      <path class="player-icon-stroke" d="M21 11.2c1.4 1.3 2.2 3 2.2 4.8s-.8 3.6-2.2 4.8M24.5 7.8c2.3 2.2 3.7 5.1 3.7 8.2s-1.4 6.1-3.7 8.2" />
+    </svg>
+  `,
+  muted: `
+    <svg class="player-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <path d="M5.5 12.2v7.6h5.1L17.5 26V6l-6.9 6.2H5.5Z" />
+      <path class="player-icon-stroke" d="m21.5 12 6 8m0-8-6 8" />
+    </svg>
+  `
+} as const;
+
+type PlayerIconName = keyof typeof PLAYER_ICONS;
+
 const initialControlTiles: ControlTile[] = [
   {
     title: "Crop",
@@ -116,13 +143,17 @@ root.innerHTML = `
         </div>
 
         <div class="player-controls" aria-label="Player controls">
-          <button class="button" type="button" data-play-toggle disabled>Play</button>
+          <button class="player-icon-button" type="button" aria-label="Play" data-play-toggle disabled>
+            ${PLAYER_ICONS.play}
+          </button>
+          <button class="player-icon-button" type="button" aria-label="Mute" aria-pressed="false" data-mute-toggle disabled>
+            ${PLAYER_ICONS.volume}
+          </button>
+          <span class="time-readout" data-time-readout>0:00 / 0:00</span>
           <label class="seek-control">
             <span>Seek</span>
             <input type="range" min="0" max="1000" value="0" step="1" data-seek disabled />
           </label>
-          <span class="time-readout" data-time-readout>00:00 / 00:00</span>
-          <button class="button" type="button" data-mute-toggle disabled>Mute</button>
         </div>
 
         <dl class="media-meta" data-media-meta aria-label="Loaded video metadata">
@@ -544,11 +575,29 @@ function updatePlaybackUi(): void {
   const duration = Number.isFinite(video.duration) ? video.duration : state.duration;
   const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
 
-  playToggle.textContent = video.paused ? "Play" : "Pause";
-  muteToggle.textContent = video.muted ? "Unmute" : "Mute";
-  timeReadout.textContent = `${formatTime(currentTime)} / ${formatTime(duration)}`;
+  setPlayerIconButton(playToggle, video.paused ? "play" : "pause", video.paused ? "Play" : "Pause", !video.paused);
+  setPlayerIconButton(muteToggle, video.muted ? "muted" : "volume", video.muted ? "Unmute" : "Mute", video.muted);
+  timeReadout.textContent = `${formatPlayerTime(currentTime)} / ${formatPlayerTime(duration)}`;
+  const seekProgress = duration > 0 ? clamp((currentTime / duration) * 100, 0, 100) : 0;
+  seekInput.style.setProperty("--seek-progress", `${seekProgress}%`);
   seekInput.value =
     duration > 0 ? String(Math.round((currentTime / duration) * Number(seekInput.max))) : "0";
+}
+
+function setPlayerIconButton(
+  button: HTMLButtonElement,
+  iconName: PlayerIconName,
+  label: string,
+  pressed: boolean
+): void {
+  if (button.dataset.icon !== iconName) {
+    button.innerHTML = PLAYER_ICONS[iconName];
+    button.dataset.icon = iconName;
+  }
+
+  button.setAttribute("aria-label", label);
+  button.setAttribute("aria-pressed", String(pressed));
+  button.title = label;
 }
 
 function setTrimRange(nextStart: number, nextEnd: number, editedEdge: "start" | "end"): void {
@@ -980,6 +1029,23 @@ function formatSecondsInput(value: number): string {
 
 function formatPreciseSeconds(value: number): string {
   return `${formatSecondsInput(value)} sec`;
+}
+
+function formatPlayerTime(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
+    return "0:00";
+  }
+
+  const roundedSeconds = Math.floor(totalSeconds);
+  const hours = Math.floor(roundedSeconds / 3600);
+  const minutes = Math.floor((roundedSeconds % 3600) / 60);
+  const seconds = roundedSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${padTime(minutes)}:${padTime(seconds)}`;
+  }
+
+  return `${minutes}:${padTime(seconds)}`;
 }
 
 function formatMarkerTime(value: number): string {
