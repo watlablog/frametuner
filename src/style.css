@@ -229,6 +229,12 @@ p {
   white-space: nowrap;
 }
 
+.upload-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .file-input {
   position: absolute;
   width: 1px;
@@ -315,13 +321,26 @@ p {
   aspect-ratio: var(--video-aspect, 16 / 9);
 }
 
-.preview-video {
+.preview-video,
+.gif-preview-canvas {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
   object-position: center center;
   background: transparent;
+}
+
+.gif-preview-canvas {
+  display: none;
+}
+
+.video-stage.is-gif .preview-video {
+  display: none;
+}
+
+.video-stage.is-gif .gif-preview-canvas {
+  display: block;
 }
 
 .crop-overlay {
@@ -673,6 +692,10 @@ input:disabled {
   justify-content: center;
   gap: 7px;
   min-width: 120px;
+}
+
+.clear-button {
+  min-width: 78px;
 }
 
 .control-grid {
@@ -1451,6 +1474,10 @@ input:disabled {
     padding-inline: 10px;
   }
 
+  .clear-button {
+    min-width: 72px;
+  }
+
   .status-pill {
     min-height: 24px;
     padding: 4px 9px;
@@ -1702,8 +1729,13 @@ input:disabled {
     grid-template-columns: 1fr;
   }
 
-  .compact-button {
+  .upload-actions {
     width: 100%;
+  }
+
+  .compact-button {
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   .control-grid {

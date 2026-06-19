@@ -7,12 +7,17 @@ type ControlTile = {
 };
 
 type PreviewState = {
+  sourceKind: SourceKind;
   sourceFile: File | null;
   sourceUrl: string | null;
   duration: number;
   width: number;
   height: number;
   canPreviewDirectly: boolean;
+  gifFrames: GifFrame[];
+  gifCurrentFrameIndex: number;
+  gifCurrentTime: number;
+  gifIsPlaying: boolean;
   trimStart: number;
   trimEnd: number;
   cropMode: CropMode;
@@ -27,10 +32,51 @@ type PreviewState = {
   activeTrimEdge: TrimEdge | null;
 };
 
+type SourceKind = "empty" | "video" | "gif";
 type TrimEdge = "start" | "end";
 type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
 type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 type ResizeMode = "original" | "custom";
+
+type GifFrame = {
+  canvas: HTMLCanvasElement;
+  startTime: number;
+  duration: number;
+};
+
+type GifDecodeResult = {
+  frames: GifFrame[];
+  width: number;
+  height: number;
+  duration: number;
+};
+
+type ImageDecoderConstructor = new (init: {
+  data: BufferSource;
+  type: string;
+}) => ImageDecoderLike;
+
+type ImageDecoderLike = {
+  tracks: {
+    ready?: Promise<void>;
+    selectedTrack?: {
+      frameCount?: number;
+    };
+  };
+  decode(options?: { frameIndex?: number; completeFramesOnly?: boolean }): Promise<{
+    image: VideoFrameLike;
+  }>;
+  close(): void;
+};
+
+type VideoFrameLike = CanvasImageSource & {
+  codedWidth?: number;
+  codedHeight?: number;
+  displayWidth?: number;
+  displayHeight?: number;
+  duration?: number | null;
+  close(): void;
+};
 
 type CropRect = {
   x: number;
@@ -57,6 +103,7 @@ const TRIM_FILMSTRIP_HIDE_DELAY_MS = 180;
 const MIN_CROP_SIZE_RATIO = 0.12;
 const MIN_OUTPUT_DIMENSION = 2;
 const MAX_OUTPUT_DIMENSION = 7680;
+const FALLBACK_GIF_FRAME_DURATION_MS = 100;
 const DEFAULT_CROP_RECT: CropRect = {
   x: 0,
   y: 0,
@@ -133,12 +180,17 @@ const initialControlTiles: ControlTile[] = [
 ];
 
 const state: PreviewState = {
+  sourceKind: "empty",
   sourceFile: null,
   sourceUrl: null,
   duration: 0,
   width: 0,
   height: 0,
   canPreviewDirectly: false,
+  gifFrames: [],
+  gifCurrentFrameIndex: 0,
+  gifCurrentTime: 0,
+  gifIsPlaying: false,
   trimStart: 0,
   trimEnd: 0,
   cropMode: "full",
@@ -179,10 +231,15 @@ root.innerHTML = `
             <strong data-upload-title>Drop a video file here</strong>
           </div>
           <input class="file-input" id="source-file" type="file" accept="video/*,image/gif" />
-          <button class="button primary compact-button" type="button" data-choose-file>
-            ${FOLDER_OPEN_ICON}
-            <span>Open</span>
-          </button>
+          <div class="upload-actions">
+            <button class="button primary compact-button" type="button" data-choose-file>
+              ${FOLDER_OPEN_ICON}
+              <span>Open</span>
+            </button>
+            <button class="button compact-button clear-button" type="button" data-reset-source disabled>
+              Clear
+            </button>
+          </div>
         </div>
 
         <div class="preview-header">
@@ -196,6 +253,7 @@ root.innerHTML = `
         <div class="video-frame" aria-label="Preview area">
           <div class="video-stage" data-video-stage>
             <video class="preview-video" playsinline preload="metadata" data-preview-video></video>
+            <canvas class="gif-preview-canvas" data-gif-preview-canvas aria-hidden="true"></canvas>
             <div class="crop-overlay" data-crop-overlay aria-hidden="true">
               <div
                 class="crop-box"
@@ -494,13 +552,15 @@ const uploadTitle = query<HTMLElement>("[data-upload-title]");
 const videoFrame = query<HTMLDivElement>(".video-frame");
 const videoStage = query<HTMLDivElement>("[data-video-stage]");
 const video = query<HTMLVideoElement>("[data-preview-video]");
+const gifCanvas = query<HTMLCanvasElement>("[data-gif-preview-canvas]");
+const gifContext = gifCanvas.getContext("2d");
 const placeholder = query<HTMLDivElement>("[data-video-placeholder]");
 const previewStatus = query<HTMLElement>("[data-preview-status]");
 const playToggle = query<HTMLButtonElement>("[data-play-toggle]");
 const muteToggle = query<HTMLButtonElement>("[data-mute-toggle]");
 const seekInput = query<HTMLInputElement>("[data-seek]");
 const timeReadout = query<HTMLElement>("[data-time-readout]");
-const resetSourceButton = query<HTMLButtonElement>("[data-reset-source]");
+const resetSourceButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-reset-source]"));
 const metaFile = query<HTMLElement>("[data-meta-file]");
 const metaResolution = query<HTMLElement>("[data-meta-resolution]");
 const metaDuration = query<HTMLElement>("[data-meta-duration]");
@@ -531,11 +591,12 @@ const resizeAspectInput = query<HTMLInputElement>("[data-resize-aspect]");
 const resizeModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-resize-mode]"));
 let trimFilmstripHideTimer: number | null = null;
 let cropDragSession: CropDragSession | null = null;
+let gifPlaybackTimer: number | null = null;
 
 chooseFileButton.addEventListener("click", () => fileInput.click());
 
 uploadBar.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" || event.key === " ") {
+  if ((event.key === "Enter" || event.key === " ") && event.target === uploadBar) {
     event.preventDefault();
     fileInput.click();
   }
@@ -565,6 +626,10 @@ uploadBar.addEventListener("drop", (event) => {
 });
 
 video.addEventListener("loadedmetadata", () => {
+  if (state.sourceKind !== "video") {
+    return;
+  }
+
   state.duration = Number.isFinite(video.duration) ? video.duration : 0;
   state.width = video.videoWidth;
   state.height = video.videoHeight;
@@ -590,22 +655,23 @@ video.addEventListener("pause", updatePlaybackUi);
 video.addEventListener("ended", updatePlaybackUi);
 
 video.addEventListener("error", () => {
-  state.canPreviewDirectly = false;
-  previewStatus.textContent = "Unsupported";
-  previewStatus.classList.remove("status-pill-muted");
-  previewStatus.classList.add("status-pill-warning");
-  placeholder.classList.remove("is-hidden");
-  video.classList.remove("is-loaded");
-  videoStage.classList.remove("is-loaded", "fit-width", "fit-height");
-  setPreviewControlsEnabled(false);
-  setCropControlsEnabled(false);
-  setResizeControlsEnabled(false);
-  renderCropUi();
-  renderResizeUi();
+  if (state.sourceKind === "video") {
+    handlePreviewLoadFailure();
+  }
 });
 
 playToggle.addEventListener("click", async () => {
   if (!state.canPreviewDirectly) {
+    return;
+  }
+
+  if (state.sourceKind === "gif") {
+    if (state.gifIsPlaying) {
+      stopGifPlayback();
+    } else {
+      startGifPlayback();
+    }
+    updatePlaybackUi();
     return;
   }
 
@@ -620,6 +686,10 @@ playToggle.addEventListener("click", async () => {
 });
 
 muteToggle.addEventListener("click", () => {
+  if (state.sourceKind === "gif") {
+    return;
+  }
+
   video.muted = !video.muted;
   updatePlaybackUi();
 });
@@ -630,7 +700,7 @@ seekInput.addEventListener("input", () => {
   }
 
   const nextTime = (Number(seekInput.value) / Number(seekInput.max)) * state.duration;
-  video.currentTime = isTrimActive() ? clamp(nextTime, state.trimStart, state.trimEnd) : nextTime;
+  seekPreviewToTime(isTrimActive() ? clamp(nextTime, state.trimStart, state.trimEnd) : nextTime);
   updatePlaybackUi();
 });
 
@@ -678,7 +748,9 @@ resizeAspectInput.addEventListener("change", () => {
 cropBox.addEventListener("pointerdown", startCropDrag);
 cropBox.addEventListener("keydown", handleCropKeyboard);
 
-resetSourceButton.addEventListener("click", resetSource);
+for (const button of resetSourceButtons) {
+  button.addEventListener("click", resetSource);
+}
 
 window.addEventListener("beforeunload", revokeSourceUrl);
 window.addEventListener("resize", updatePreviewFit);
@@ -706,13 +778,23 @@ function handleDragOver(event: DragEvent): void {
   uploadBar.classList.add("is-dragging");
 }
 
+function isGifFile(file: File): boolean {
+  return file.type === "image/gif" || file.name.toLowerCase().endsWith(".gif");
+}
+
 function loadSourceFile(file: File): void {
   revokeSourceUrl();
+  stopGifPlayback();
+  state.sourceKind = "empty";
   resetVideoElement();
   resetTrimFilmstrip();
+  resetGifState();
+
+  const isGif = isGifFile(file);
 
   state.sourceFile = file;
-  state.sourceUrl = URL.createObjectURL(file);
+  state.sourceKind = isGif ? "gif" : "video";
+  state.sourceUrl = null;
   state.duration = 0;
   state.width = 0;
   state.height = 0;
@@ -727,6 +809,7 @@ function loadSourceFile(file: File): void {
   state.resizeHeight = 0;
   state.resizeAspectLocked = true;
   state.thumbnailGenerationId += 1;
+  const generationId = state.thumbnailGenerationId;
 
   uploadTitle.textContent = file.name;
   previewStatus.textContent = "Loading";
@@ -744,15 +827,80 @@ function loadSourceFile(file: File): void {
   renderCropUi();
   renderResizeUi();
 
+  if (isGif) {
+    void loadGifSource(file, generationId);
+    return;
+  }
+
+  state.sourceUrl = URL.createObjectURL(file);
   video.src = state.sourceUrl;
   video.load();
+}
+
+async function loadGifSource(file: File, generationId: number): Promise<void> {
+  try {
+    const decodedGif = await decodeGifFrames(file, generationId);
+
+    if (!decodedGif || !isCurrentSourceGeneration(file, generationId)) {
+      return;
+    }
+
+    state.gifFrames = decodedGif.frames;
+    state.gifCurrentFrameIndex = 0;
+    state.gifCurrentTime = 0;
+    state.duration = decodedGif.duration;
+    state.width = decodedGif.width;
+    state.height = decodedGif.height;
+    state.canPreviewDirectly = true;
+    state.trimStart = 0;
+    state.trimEnd = state.duration;
+    state.cropMode = "full";
+    state.cropRect = { ...DEFAULT_CROP_RECT };
+    state.freeCropSizeLocked = false;
+    state.resizeMode = "original";
+    state.resizeWidth = state.width;
+    state.resizeHeight = state.height;
+    state.resizeAspectLocked = true;
+
+    gifCanvas.width = state.width;
+    gifCanvas.height = state.height;
+    renderLoadedState();
+    drawGifFrame(0);
+    void generateTrimThumbnails();
+  } catch {
+    if (isCurrentSourceGeneration(file, generationId)) {
+      handlePreviewLoadFailure();
+    }
+  }
+}
+
+function handlePreviewLoadFailure(): void {
+  stopGifPlayback();
+  state.canPreviewDirectly = false;
+  previewStatus.textContent = "Unsupported";
+  previewStatus.classList.remove("status-pill-muted");
+  previewStatus.classList.add("status-pill-warning");
+  placeholder.classList.remove("is-hidden");
+  video.classList.remove("is-loaded");
+  gifCanvas.classList.remove("is-loaded");
+  videoStage.classList.remove("is-loaded", "is-gif", "fit-width", "fit-height");
+  setPreviewControlsEnabled(false);
+  setTrimControlsEnabled(false);
+  setCropControlsEnabled(false);
+  setResizeControlsEnabled(false);
+  renderTrimUi();
+  renderCropUi();
+  renderResizeUi();
+  updatePlaybackUi();
 }
 
 function renderLoadedState(): void {
   previewStatus.textContent = "Ready";
   previewStatus.classList.remove("status-pill-muted", "status-pill-warning");
   placeholder.classList.add("is-hidden");
-  video.classList.add("is-loaded");
+  video.classList.toggle("is-loaded", state.sourceKind === "video");
+  gifCanvas.classList.toggle("is-loaded", state.sourceKind === "gif");
+  videoStage.classList.toggle("is-gif", state.sourceKind === "gif");
   metaResolution.textContent =
     state.width > 0 && state.height > 0 ? `${state.width} x ${state.height}` : "Unknown";
   metaDuration.textContent = formatTime(state.duration);
@@ -765,6 +913,116 @@ function renderLoadedState(): void {
   renderCropUi();
   renderResizeUi();
   updatePlaybackUi();
+}
+
+async function decodeGifFrames(file: File, generationId: number): Promise<GifDecodeResult | null> {
+  const ImageDecoder = getImageDecoderConstructor();
+
+  if (!ImageDecoder) {
+    throw new Error("GIF decoding is not supported in this browser.");
+  }
+
+  const decoder = new ImageDecoder({
+    data: await file.arrayBuffer(),
+    type: "image/gif"
+  });
+
+  try {
+    await decoder.tracks.ready;
+
+    if (!isCurrentSourceGeneration(file, generationId)) {
+      return null;
+    }
+
+    const frameCount = Math.max(1, Math.floor(decoder.tracks.selectedTrack?.frameCount ?? 1));
+    const frames: GifFrame[] = [];
+    let width = 0;
+    let height = 0;
+    let startTime = 0;
+
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      if (!isCurrentSourceGeneration(file, generationId)) {
+        return null;
+      }
+
+      const decodedFrame = await decoder.decode({ frameIndex, completeFramesOnly: true });
+      const image = decodedFrame.image;
+
+      try {
+        const frameWidth = getDecodedFrameWidth(image);
+        const frameHeight = getDecodedFrameHeight(image);
+
+        if (frameWidth <= 0 || frameHeight <= 0) {
+          throw new Error("GIF dimensions could not be decoded.");
+        }
+
+        width = width || frameWidth;
+        height = height || frameHeight;
+
+        const frameCanvas = document.createElement("canvas");
+        const frameContext = frameCanvas.getContext("2d");
+
+        if (!frameContext) {
+          throw new Error("Canvas is not available.");
+        }
+
+        frameCanvas.width = width;
+        frameCanvas.height = height;
+        frameContext.clearRect(0, 0, width, height);
+        frameContext.drawImage(image, 0, 0, width, height);
+
+        const duration = getDecodedFrameDurationSeconds(image);
+        frames.push({
+          canvas: frameCanvas,
+          startTime: roundTime(startTime),
+          duration
+        });
+        startTime += duration;
+      } finally {
+        image.close();
+      }
+    }
+
+    const duration = roundTime(startTime);
+
+    if (frames.length === 0 || width <= 0 || height <= 0 || duration <= 0) {
+      throw new Error("GIF does not contain usable frames.");
+    }
+
+    return {
+      frames,
+      width,
+      height,
+      duration
+    };
+  } finally {
+    decoder.close();
+  }
+}
+
+function getImageDecoderConstructor(): ImageDecoderConstructor | null {
+  return (globalThis as unknown as { ImageDecoder?: ImageDecoderConstructor }).ImageDecoder ?? null;
+}
+
+function getDecodedFrameWidth(frame: VideoFrameLike): number {
+  return Math.round(frame.displayWidth ?? frame.codedWidth ?? 0);
+}
+
+function getDecodedFrameHeight(frame: VideoFrameLike): number {
+  return Math.round(frame.displayHeight ?? frame.codedHeight ?? 0);
+}
+
+function getDecodedFrameDurationSeconds(frame: VideoFrameLike): number {
+  const durationValue = Number(frame.duration);
+  const durationMs = Number.isFinite(durationValue) && durationValue > 0
+    ? durationValue >= 1000 ? durationValue / 1000 : durationValue
+    : FALLBACK_GIF_FRAME_DURATION_MS;
+
+  return clamp(durationMs, 20, 10000) / 1000;
+}
+
+function isCurrentSourceGeneration(file: File, generationId: number): boolean {
+  return state.sourceFile === file && state.thumbnailGenerationId === generationId;
 }
 
 function updatePreviewFit(): void {
@@ -791,6 +1049,10 @@ function updatePreviewFit(): void {
 }
 
 function handleTimeUpdate(): void {
+  if (state.sourceKind !== "video") {
+    return;
+  }
+
   if (isTrimActive() && video.currentTime >= state.trimEnd) {
     video.pause();
     video.currentTime = state.trimEnd;
@@ -802,11 +1064,15 @@ function handleTimeUpdate(): void {
 }
 
 function updatePlaybackUi(): void {
-  const duration = Number.isFinite(video.duration) ? video.duration : state.duration;
-  const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const duration = state.sourceKind === "video" && Number.isFinite(video.duration) ? video.duration : state.duration;
+  const currentTime = getCurrentPreviewTime();
+  const isPlaying = state.sourceKind === "gif" ? state.gifIsPlaying : !video.paused;
+  const muteLabel = state.sourceKind === "gif" ? "No audio" : video.muted ? "Unmute" : "Mute";
+  const muteIcon = state.sourceKind === "gif" ? "volume" : video.muted ? "muted" : "volume";
+  const mutePressed = state.sourceKind === "gif" ? false : video.muted;
 
-  setPlayerIconButton(playToggle, video.paused ? "play" : "pause", video.paused ? "Play" : "Pause", !video.paused);
-  setPlayerIconButton(muteToggle, video.muted ? "muted" : "volume", video.muted ? "Unmute" : "Mute", video.muted);
+  setPlayerIconButton(playToggle, isPlaying ? "pause" : "play", isPlaying ? "Pause" : "Play", isPlaying);
+  setPlayerIconButton(muteToggle, muteIcon, muteLabel, mutePressed);
   timeReadout.textContent = `${formatPlayerTime(currentTime)} / ${formatPlayerTime(duration)}`;
   const seekProgress = duration > 0 ? clamp((currentTime / duration) * 100, 0, 100) : 0;
   seekInput.style.setProperty("--seek-progress", `${seekProgress}%`);
@@ -830,8 +1096,193 @@ function setPlayerIconButton(
   button.title = label;
 }
 
+function getCurrentPreviewTime(): number {
+  if (state.sourceKind === "gif") {
+    return state.gifCurrentTime;
+  }
+
+  return Number.isFinite(video.currentTime) ? video.currentTime : 0;
+}
+
+function seekPreviewToTime(time: number): void {
+  const targetTime = clamp(time, 0, state.duration);
+
+  if (state.sourceKind === "gif") {
+    setGifCurrentTime(getNearestGifFrameStart(targetTime));
+    return;
+  }
+
+  video.currentTime = isTrimActive() ? clamp(targetTime, state.trimStart, state.trimEnd) : targetTime;
+}
+
+function startGifPlayback(): void {
+  if (state.sourceKind !== "gif" || state.gifFrames.length === 0) {
+    return;
+  }
+
+  if (state.gifCurrentTime < state.trimStart || state.gifCurrentTime >= state.trimEnd) {
+    setGifCurrentTime(state.trimStart);
+  }
+
+  state.gifIsPlaying = true;
+  scheduleNextGifFrame();
+}
+
+function stopGifPlayback(): void {
+  state.gifIsPlaying = false;
+
+  if (gifPlaybackTimer !== null) {
+    window.clearTimeout(gifPlaybackTimer);
+    gifPlaybackTimer = null;
+  }
+}
+
+function scheduleNextGifFrame(): void {
+  if (!state.gifIsPlaying || state.sourceKind !== "gif") {
+    return;
+  }
+
+  const frame = state.gifFrames[state.gifCurrentFrameIndex];
+
+  if (!frame) {
+    stopGifPlayback();
+    updatePlaybackUi();
+    return;
+  }
+
+  const elapsedInFrame = Math.max(0, state.gifCurrentTime - frame.startTime);
+  const remainingMs = Math.max(20, (frame.duration - elapsedInFrame) * 1000);
+
+  if (gifPlaybackTimer !== null) {
+    window.clearTimeout(gifPlaybackTimer);
+  }
+
+  gifPlaybackTimer = window.setTimeout(() => {
+    const nextTime = roundTime(frame.startTime + frame.duration);
+    const stopTime = isTrimActive() ? state.trimEnd : state.duration;
+
+    if (nextTime >= stopTime - 0.0001) {
+      setGifCurrentTime(stopTime, true);
+      stopGifPlayback();
+      updatePlaybackUi();
+      return;
+    }
+
+    setGifCurrentTime(nextTime);
+    updatePlaybackUi();
+    scheduleNextGifFrame();
+  }, remainingMs);
+}
+
+function setGifCurrentTime(time: number, preferPreviousBoundary = false): void {
+  if (state.sourceKind !== "gif" || state.gifFrames.length === 0) {
+    return;
+  }
+
+  const clampedTime = clamp(time, 0, state.duration);
+  const frameIndex = getGifFrameIndexAtTime(clampedTime, preferPreviousBoundary);
+  state.gifCurrentFrameIndex = frameIndex;
+  state.gifCurrentTime = roundTime(clampedTime);
+  drawGifFrame(frameIndex);
+}
+
+function drawGifFrame(frameIndex: number): void {
+  if (!gifContext) {
+    return;
+  }
+
+  const frame = state.gifFrames[frameIndex];
+
+  if (!frame) {
+    return;
+  }
+
+  gifContext.clearRect(0, 0, gifCanvas.width, gifCanvas.height);
+  gifContext.drawImage(frame.canvas, 0, 0, gifCanvas.width, gifCanvas.height);
+}
+
+function getGifFrameIndexAtTime(time: number, preferPreviousBoundary = false): number {
+  const frames = state.gifFrames;
+
+  if (frames.length <= 1) {
+    return 0;
+  }
+
+  const safeTime = clamp(time, 0, state.duration);
+
+  if (safeTime >= state.duration) {
+    return frames.length - 1;
+  }
+
+  if (preferPreviousBoundary) {
+    for (let index = frames.length - 1; index > 0; index -= 1) {
+      if (Math.abs(safeTime - frames[index].startTime) < 0.0001) {
+        return index - 1;
+      }
+    }
+  }
+
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    if (safeTime >= frames[index].startTime) {
+      return index;
+    }
+  }
+
+  return 0;
+}
+
+function getGifFrameBoundaries(): number[] {
+  if (state.gifFrames.length === 0) {
+    return [0];
+  }
+
+  return [
+    ...state.gifFrames.map((frame) => frame.startTime),
+    state.duration
+  ];
+}
+
+function getNearestGifFrameStart(time: number): number {
+  if (state.gifFrames.length === 0) {
+    return 0;
+  }
+
+  let nearestTime = state.gifFrames[0].startTime;
+  let nearestDistance = Math.abs(nearestTime - time);
+
+  for (const frame of state.gifFrames) {
+    const distance = Math.abs(frame.startTime - time);
+    if (distance < nearestDistance) {
+      nearestTime = frame.startTime;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearestTime;
+}
+
+function getNearestGifBoundaryIndex(time: number, boundaries = getGifFrameBoundaries()): number {
+  let nearestIndex = 0;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < boundaries.length; index += 1) {
+    const distance = Math.abs(boundaries[index] - time);
+    if (distance < nearestDistance) {
+      nearestIndex = index;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearestIndex;
+}
+
 function setTrimRange(nextStart: number, nextEnd: number, editedEdge: "start" | "end"): void {
   if (!state.canPreviewDirectly || state.duration <= 0) {
+    return;
+  }
+
+  if (state.sourceKind === "gif") {
+    setGifTrimRange(nextStart, nextEnd, editedEdge);
     return;
   }
 
@@ -855,12 +1306,36 @@ function setTrimRange(nextStart: number, nextEnd: number, editedEdge: "start" | 
   state.trimStart = roundTime(start);
   state.trimEnd = roundTime(end);
 
-  if (video.currentTime < state.trimStart) {
-    video.currentTime = state.trimStart;
+  seekPreviewToTime(video.currentTime);
+
+  renderTrimUi();
+  updatePlaybackUi();
+}
+
+function setGifTrimRange(nextStart: number, nextEnd: number, editedEdge: "start" | "end"): void {
+  const boundaries = getGifFrameBoundaries();
+
+  if (boundaries.length < 2) {
+    return;
   }
 
-  if (video.currentTime > state.trimEnd) {
-    video.currentTime = state.trimEnd;
+  let startIndex = getNearestGifBoundaryIndex(nextStart, boundaries);
+  let endIndex = getNearestGifBoundaryIndex(nextEnd, boundaries);
+
+  if (endIndex <= startIndex) {
+    if (editedEdge === "start") {
+      startIndex = Math.max(0, endIndex - 1);
+    } else {
+      endIndex = Math.min(boundaries.length - 1, startIndex + 1);
+    }
+  }
+
+  state.trimStart = boundaries[startIndex];
+  state.trimEnd = boundaries[endIndex];
+
+  const currentTime = getCurrentPreviewTime();
+  if (currentTime < state.trimStart || currentTime > state.trimEnd) {
+    setGifCurrentTime(editedEdge === "end" ? state.trimEnd : state.trimStart, editedEdge === "end");
   }
 
   renderTrimUi();
@@ -1526,7 +2001,17 @@ function getResizeModeLabel(mode: ResizeMode): string {
 }
 
 async function generateTrimThumbnails(): Promise<void> {
-  if (!state.sourceUrl || !state.canPreviewDirectly || state.duration <= 0) {
+  if (!state.canPreviewDirectly || state.duration <= 0) {
+    resetTrimFilmstrip();
+    return;
+  }
+
+  if (state.sourceKind === "gif") {
+    generateGifTrimThumbnails();
+    return;
+  }
+
+  if (!state.sourceUrl) {
     resetTrimFilmstrip();
     return;
   }
@@ -1566,7 +2051,7 @@ async function generateTrimThumbnails(): Promise<void> {
 
       const progress = thumbnailCount === 1 ? 0 : index / (thumbnailCount - 1);
       await seekThumbnailVideoTo(thumbnailVideo, maxSampleTime * progress);
-      drawContainedFrame(context, thumbnailVideo, canvas.width, canvas.height);
+      drawContainedFrame(context, thumbnailVideo, thumbnailVideo.videoWidth, thumbnailVideo.videoHeight, canvas.width, canvas.height);
       thumbnails.push(canvas.toDataURL("image/jpeg", 0.72));
     }
 
@@ -1588,6 +2073,41 @@ async function generateTrimThumbnails(): Promise<void> {
   } finally {
     thumbnailVideo.removeAttribute("src");
     thumbnailVideo.load();
+  }
+}
+
+function generateGifTrimThumbnails(): void {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context || state.gifFrames.length === 0) {
+    resetTrimFilmstrip();
+    return;
+  }
+
+  canvas.width = TRIM_THUMBNAIL_WIDTH;
+  canvas.height = TRIM_THUMBNAIL_HEIGHT;
+
+  const thumbnails: string[] = [];
+  const thumbnailCount: number = TRIM_THUMBNAIL_COUNT;
+
+  for (let index = 0; index < thumbnailCount; index += 1) {
+    const progress = thumbnailCount === 1 ? 0 : index / (thumbnailCount - 1);
+    const frameIndex = getGifFrameIndexAtTime(state.duration * progress, progress === 1);
+    const frame = state.gifFrames[frameIndex];
+
+    if (frame) {
+      drawContainedFrame(context, frame.canvas, frame.canvas.width, frame.canvas.height, canvas.width, canvas.height);
+      thumbnails.push(canvas.toDataURL("image/jpeg", 0.72));
+    }
+  }
+
+  state.thumbnailDataUrls = thumbnails;
+  renderTrimFilmstripThumbnails();
+  renderTrimUi();
+
+  if (state.activeTrimEdge !== null) {
+    trimFilmstrip.classList.add("is-visible");
   }
 }
 
@@ -1651,7 +2171,13 @@ function seekPreviewToTrimEdge(edge: TrimEdge): void {
     return;
   }
 
-  video.currentTime = edge === "end" ? state.trimEnd : state.trimStart;
+  if (state.sourceKind === "gif") {
+    setGifCurrentTime(edge === "end" ? state.trimEnd : state.trimStart, edge === "end");
+    updatePlaybackUi();
+    return;
+  }
+
+  seekPreviewToTime(edge === "end" ? state.trimEnd : state.trimStart);
   updatePlaybackUi();
 }
 
@@ -1721,13 +2247,12 @@ function seekThumbnailVideoTo(targetVideo: HTMLVideoElement, time: number): Prom
 
 function drawContainedFrame(
   context: CanvasRenderingContext2D,
-  sourceVideo: HTMLVideoElement,
+  source: CanvasImageSource,
+  sourceWidth: number,
+  sourceHeight: number,
   canvasWidth: number,
   canvasHeight: number
 ): void {
-  const sourceWidth = sourceVideo.videoWidth;
-  const sourceHeight = sourceVideo.videoHeight;
-
   context.fillStyle = "#020913";
   context.fillRect(0, 0, canvasWidth, canvasHeight);
 
@@ -1741,7 +2266,7 @@ function drawContainedFrame(
   const drawX = (canvasWidth - drawWidth) / 2;
   const drawY = (canvasHeight - drawHeight) / 2;
 
-  context.drawImage(sourceVideo, drawX, drawY, drawWidth, drawHeight);
+  context.drawImage(source, drawX, drawY, drawWidth, drawHeight);
 }
 
 function isTrimActive(): boolean {
@@ -1770,15 +2295,20 @@ function timeToSliderValue(value: number): number {
 
 function setPreviewControlsEnabled(enabled: boolean): void {
   playToggle.disabled = !enabled;
-  muteToggle.disabled = !enabled;
+  muteToggle.disabled = !enabled || state.sourceKind === "gif";
   seekInput.disabled = !enabled;
-  resetSourceButton.disabled = !state.sourceFile;
+  for (const button of resetSourceButtons) {
+    button.disabled = !state.sourceFile;
+  }
 }
 
 function resetSource(): void {
   revokeSourceUrl();
+  stopGifPlayback();
+  state.sourceKind = "empty";
   resetVideoElement();
   resetTrimFilmstrip();
+  resetGifState();
 
   state.sourceFile = null;
   state.sourceUrl = null;
@@ -1822,15 +2352,30 @@ function resetVideoElement(): void {
   video.removeAttribute("src");
   video.load();
   video.classList.remove("is-loaded");
-  videoStage.classList.remove("is-loaded", "fit-width", "fit-height");
+  gifCanvas.classList.remove("is-loaded");
+  videoStage.classList.remove("is-loaded", "is-gif", "fit-width", "fit-height");
   cropDragSession = null;
   cropBox.classList.remove("is-dragging");
+
+  if (gifContext) {
+    gifContext.clearRect(0, 0, gifCanvas.width, gifCanvas.height);
+  }
 }
 
 function revokeSourceUrl(): void {
   if (state.sourceUrl) {
     URL.revokeObjectURL(state.sourceUrl);
+    state.sourceUrl = null;
   }
+}
+
+function resetGifState(): void {
+  state.gifFrames = [];
+  state.gifCurrentFrameIndex = 0;
+  state.gifCurrentTime = 0;
+  state.gifIsPlaying = false;
+  gifCanvas.width = 0;
+  gifCanvas.height = 0;
 }
 
 function clamp(value: number, min: number, max: number): number {
