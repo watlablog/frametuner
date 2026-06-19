@@ -15,12 +15,33 @@ type PreviewState = {
   canPreviewDirectly: boolean;
   trimStart: number;
   trimEnd: number;
+  cropMode: CropMode;
+  cropRect: CropRect;
+  freeCropSizeLocked: boolean;
   thumbnailDataUrls: string[];
   thumbnailGenerationId: number;
   activeTrimEdge: TrimEdge | null;
 };
 
 type TrimEdge = "start" | "end";
+type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
+type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
+
+type CropRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type CropDragSession = {
+  handle: CropHandle;
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startRect: CropRect;
+  stageRect: DOMRect;
+};
 
 const TRIM_SLIDER_MAX = 1000;
 const MIN_TRIM_SECONDS = 0.1;
@@ -28,6 +49,25 @@ const TRIM_THUMBNAIL_COUNT = 12;
 const TRIM_THUMBNAIL_WIDTH = 160;
 const TRIM_THUMBNAIL_HEIGHT = 90;
 const TRIM_FILMSTRIP_HIDE_DELAY_MS = 180;
+const MIN_CROP_SIZE_RATIO = 0.12;
+const DEFAULT_CROP_RECT: CropRect = {
+  x: 0,
+  y: 0,
+  width: 1,
+  height: 1
+};
+
+const CROP_MODES: Array<{
+  mode: CropMode;
+  label: string;
+  ratio: number | null;
+}> = [
+  { mode: "full", label: "Full", ratio: null },
+  { mode: "16:9", label: "16:9", ratio: 16 / 9 },
+  { mode: "9:16", label: "9:16", ratio: 9 / 16 },
+  { mode: "1:1", label: "1:1", ratio: 1 },
+  { mode: "free", label: "Free", ratio: null }
+];
 
 const PLAYER_ICONS = {
   play: `
@@ -58,11 +98,6 @@ type PlayerIconName = keyof typeof PLAYER_ICONS;
 
 const initialControlTiles: ControlTile[] = [
   {
-    title: "Crop",
-    value: "Full frame",
-    note: "Area"
-  },
-  {
     title: "Size",
     value: "Original",
     note: "Scale"
@@ -88,6 +123,9 @@ const state: PreviewState = {
   canPreviewDirectly: false,
   trimStart: 0,
   trimEnd: 0,
+  cropMode: "full",
+  cropRect: { ...DEFAULT_CROP_RECT },
+  freeCropSizeLocked: false,
   thumbnailDataUrls: [],
   thumbnailGenerationId: 0,
   activeTrimEdge: null
@@ -135,7 +173,31 @@ root.innerHTML = `
         </div>
 
         <div class="video-frame" aria-label="Preview area">
-          <video class="preview-video" playsinline preload="metadata" data-preview-video></video>
+          <div class="video-stage" data-video-stage>
+            <video class="preview-video" playsinline preload="metadata" data-preview-video></video>
+            <div class="crop-overlay" data-crop-overlay aria-hidden="true">
+              <div
+                class="crop-box"
+                data-crop-box
+                role="group"
+                tabindex="0"
+                aria-label="Crop area"
+              >
+                <span class="crop-grid-line crop-grid-line-vertical first" aria-hidden="true"></span>
+                <span class="crop-grid-line crop-grid-line-vertical second" aria-hidden="true"></span>
+                <span class="crop-grid-line crop-grid-line-horizontal first" aria-hidden="true"></span>
+                <span class="crop-grid-line crop-grid-line-horizontal second" aria-hidden="true"></span>
+                <span class="crop-handle crop-handle-n" data-crop-handle="n" aria-hidden="true"></span>
+                <span class="crop-handle crop-handle-e" data-crop-handle="e" aria-hidden="true"></span>
+                <span class="crop-handle crop-handle-s" data-crop-handle="s" aria-hidden="true"></span>
+                <span class="crop-handle crop-handle-w" data-crop-handle="w" aria-hidden="true"></span>
+                <span class="crop-handle crop-handle-nw" data-crop-handle="nw" aria-hidden="true"></span>
+                <span class="crop-handle crop-handle-ne" data-crop-handle="ne" aria-hidden="true"></span>
+                <span class="crop-handle crop-handle-sw" data-crop-handle="sw" aria-hidden="true"></span>
+                <span class="crop-handle crop-handle-se" data-crop-handle="se" aria-hidden="true"></span>
+              </div>
+            </div>
+          </div>
           <div class="video-placeholder" data-video-placeholder>
             <span class="preview-monogram" aria-hidden="true">FT</span>
             <p>Load a short clip to preview it here.</p>
@@ -238,6 +300,72 @@ root.innerHTML = `
           <p class="trim-message" data-trim-message>Load a video to choose a time range.</p>
         </section>
 
+        <section class="crop-panel" aria-labelledby="crop-title">
+          <div class="crop-heading">
+            <div>
+              <span class="section-kicker">Frame</span>
+              <h3 id="crop-title">Crop</h3>
+            </div>
+            <span data-crop-summary>Full frame</span>
+          </div>
+
+          <div class="crop-mode-grid" role="group" aria-label="Crop aspect ratio">
+            ${CROP_MODES.map(
+              (cropMode) => `
+                <button
+                  class="crop-mode-button"
+                  type="button"
+                  data-crop-mode="${cropMode.mode}"
+                  disabled
+                >
+                  ${cropMode.label}
+                </button>
+              `
+            ).join("")}
+          </div>
+
+          <label class="crop-size-control">
+            <span>Crop size</span>
+            <input type="range" min="20" max="100" value="100" step="1" data-crop-size disabled />
+          </label>
+
+          <div class="free-size-fields" data-free-size-fields>
+            <label>
+              <span>Width</span>
+              <input
+                type="number"
+                min="1"
+                value="0"
+                step="1"
+                inputmode="numeric"
+                aria-label="Free crop width in pixels"
+                data-free-crop-width
+                disabled
+              />
+            </label>
+            <label>
+              <span>Height</span>
+              <input
+                type="number"
+                min="1"
+                value="0"
+                step="1"
+                inputmode="numeric"
+                aria-label="Free crop height in pixels"
+                data-free-crop-height
+                disabled
+              />
+            </label>
+            <span class="free-size-state" data-free-size-state>Free</span>
+          </div>
+
+          <div class="crop-actions">
+            <button class="button" type="button" data-reset-crop disabled>Reset crop</button>
+          </div>
+
+          <p class="crop-message" data-crop-message>Load a video to crop the preview frame.</p>
+        </section>
+
         <div class="control-grid">
           ${initialControlTiles
             .map(
@@ -308,6 +436,7 @@ const uploadBar = query<HTMLDivElement>(".upload-bar");
 const uploadTitle = query<HTMLElement>("[data-upload-title]");
 const uploadCopy = query<HTMLElement>("[data-upload-copy]");
 const videoFrame = query<HTMLDivElement>(".video-frame");
+const videoStage = query<HTMLDivElement>("[data-video-stage]");
 const video = query<HTMLVideoElement>("[data-preview-video]");
 const placeholder = query<HTMLDivElement>("[data-video-placeholder]");
 const previewStatus = query<HTMLElement>("[data-preview-status]");
@@ -332,7 +461,19 @@ const trimStartMarkerTime = query<HTMLElement>("[data-trim-start-marker-time]");
 const trimEndMarkerTime = query<HTMLElement>("[data-trim-end-marker-time]");
 const trimActiveLabel = query<HTMLElement>("[data-trim-active-label]");
 const trimActiveTime = query<HTMLElement>("[data-trim-active-time]");
+const cropOverlay = query<HTMLDivElement>("[data-crop-overlay]");
+const cropBox = query<HTMLDivElement>("[data-crop-box]");
+const cropSummary = query<HTMLElement>("[data-crop-summary]");
+const cropMessage = query<HTMLElement>("[data-crop-message]");
+const cropSizeInput = query<HTMLInputElement>("[data-crop-size]");
+const freeSizeFields = query<HTMLDivElement>("[data-free-size-fields]");
+const freeCropWidthInput = query<HTMLInputElement>("[data-free-crop-width]");
+const freeCropHeightInput = query<HTMLInputElement>("[data-free-crop-height]");
+const freeSizeState = query<HTMLElement>("[data-free-size-state]");
+const cropModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-crop-mode]"));
+const resetCropButton = query<HTMLButtonElement>("[data-reset-crop]");
 let trimFilmstripHideTimer: number | null = null;
+let cropDragSession: CropDragSession | null = null;
 
 chooseFileButton.addEventListener("click", () => fileInput.click());
 
@@ -373,6 +514,9 @@ video.addEventListener("loadedmetadata", () => {
   state.canPreviewDirectly = true;
   state.trimStart = 0;
   state.trimEnd = state.duration;
+  state.cropMode = "full";
+  state.cropRect = { ...DEFAULT_CROP_RECT };
+  state.freeCropSizeLocked = false;
   video.currentTime = 0;
   renderLoadedState();
   void generateTrimThumbnails();
@@ -392,7 +536,10 @@ video.addEventListener("error", () => {
   inspectorStatus.textContent = "Preview failed";
   placeholder.classList.remove("is-hidden");
   video.classList.remove("is-loaded");
+  videoStage.classList.remove("is-loaded", "fit-width", "fit-height");
   setPreviewControlsEnabled(false);
+  setCropControlsEnabled(false);
+  renderCropUi();
   uploadCopy.textContent = "This file cannot be previewed directly by this browser.";
 });
 
@@ -429,12 +576,38 @@ seekInput.addEventListener("input", () => {
 bindTrimRangeEvents(trimStartRange, "start");
 bindTrimRangeEvents(trimEndRange, "end");
 
+for (const button of cropModeButtons) {
+  button.addEventListener("click", () => {
+    const mode = button.dataset.cropMode as CropMode | undefined;
+    if (mode) {
+      setCropMode(mode);
+    }
+  });
+}
+
+cropSizeInput.addEventListener("input", () => {
+  setCropScale(Number(cropSizeInput.value));
+});
+
+freeCropWidthInput.addEventListener("change", applyFreeCropSizeFromInputs);
+freeCropHeightInput.addEventListener("change", applyFreeCropSizeFromInputs);
+
+resetCropButton.addEventListener("click", () => {
+  resetCropToFullFrame();
+});
+
+cropBox.addEventListener("pointerdown", startCropDrag);
+cropBox.addEventListener("keydown", handleCropKeyboard);
+
 resetSourceButton.addEventListener("click", resetSource);
 
 window.addEventListener("beforeunload", revokeSourceUrl);
 window.addEventListener("resize", updatePreviewFit);
 window.addEventListener("pointerup", handleGlobalTrimPointerEnd);
 window.addEventListener("pointercancel", handleGlobalTrimPointerEnd);
+window.addEventListener("pointermove", handleCropDragMove);
+window.addEventListener("pointerup", endCropDrag);
+window.addEventListener("pointercancel", endCropDrag);
 
 if ("ResizeObserver" in window) {
   const previewResizeObserver = new ResizeObserver(updatePreviewFit);
@@ -467,6 +640,9 @@ function loadSourceFile(file: File): void {
   state.canPreviewDirectly = false;
   state.trimStart = 0;
   state.trimEnd = 0;
+  state.cropMode = "full";
+  state.cropRect = { ...DEFAULT_CROP_RECT };
+  state.freeCropSizeLocked = false;
   state.thumbnailGenerationId += 1;
 
   uploadTitle.textContent = file.name;
@@ -481,7 +657,9 @@ function loadSourceFile(file: File): void {
   metaSize.textContent = formatFileSize(file.size);
   setPreviewControlsEnabled(false);
   setTrimControlsEnabled(false);
+  setCropControlsEnabled(false);
   renderTrimUi();
+  renderCropUi();
 
   video.src = state.sourceUrl;
   video.load();
@@ -500,13 +678,15 @@ function renderLoadedState(): void {
   updatePreviewFit();
   setPreviewControlsEnabled(true);
   setTrimControlsEnabled(true);
+  setCropControlsEnabled(true);
   renderTrimUi();
+  renderCropUi();
   updatePlaybackUi();
 }
 
 function updatePreviewFit(): void {
   if (!state.canPreviewDirectly || state.width <= 0 || state.height <= 0) {
-    video.classList.remove("fit-width", "fit-height");
+    videoStage.classList.remove("fit-width", "fit-height");
     return;
   }
 
@@ -520,8 +700,11 @@ function updatePreviewFit(): void {
   const frameRatio = frameRect.width / frameRect.height;
   const fitWidth = videoRatio >= frameRatio;
 
-  video.classList.toggle("fit-width", fitWidth);
-  video.classList.toggle("fit-height", !fitWidth);
+  videoStage.style.setProperty("--video-aspect", String(videoRatio));
+  videoStage.classList.add("is-loaded");
+  videoStage.classList.toggle("fit-width", fitWidth);
+  videoStage.classList.toggle("fit-height", !fitWidth);
+  renderCropUi();
 }
 
 function handleTimeUpdate(): void {
@@ -666,6 +849,456 @@ function renderTrimUi(): void {
 function setTrimControlsEnabled(enabled: boolean): void {
   trimStartRange.disabled = !enabled;
   trimEndRange.disabled = !enabled;
+}
+
+function setCropControlsEnabled(enabled: boolean): void {
+  for (const button of cropModeButtons) {
+    button.disabled = !enabled;
+  }
+
+  cropSizeInput.disabled = !enabled || state.cropMode === "full";
+  freeCropWidthInput.disabled = !enabled || state.cropMode !== "free";
+  freeCropHeightInput.disabled = !enabled || state.cropMode !== "free";
+  resetCropButton.disabled = !enabled || state.cropMode === "full";
+  cropBox.tabIndex = enabled && state.cropMode !== "full" ? 0 : -1;
+}
+
+function setCropMode(mode: CropMode): void {
+  if (!isCropEditable()) {
+    return;
+  }
+
+  const previousMode = state.cropMode;
+  const previousScale = getCropScalePercent() / 100;
+  const center = getCropCenter(state.cropRect);
+
+  state.cropMode = mode;
+  state.freeCropSizeLocked = false;
+
+  if (mode === "full") {
+    state.cropRect = { ...DEFAULT_CROP_RECT };
+  } else if (mode === "free" && previousMode !== "full") {
+    state.cropRect = clampCropRect(state.cropRect);
+  } else if (mode === "free") {
+    state.cropRect = makeCropRectFromCenter(center.x, center.y, 0.82, 0.82);
+  } else {
+    const cropScale = previousMode === "full" ? 0.86 : previousScale;
+    state.cropRect = makeCropRectForMode(mode, center.x, center.y, cropScale);
+  }
+
+  renderCropUi();
+}
+
+function setCropScale(percent: number): void {
+  if (!isCropEditable() || state.cropMode === "full") {
+    return;
+  }
+
+  if (state.cropMode === "free") {
+    state.freeCropSizeLocked = false;
+  }
+
+  const cropScale = clamp(percent / 100, MIN_CROP_SIZE_RATIO, 1);
+  const center = getCropCenter(state.cropRect);
+
+  if (state.cropMode === "free") {
+    const normalizedAspect = state.cropRect.width / state.cropRect.height;
+    const maxSize = getMaxCropSizeForNormalizedAspect(normalizedAspect);
+    state.cropRect = makeCropRectFromCenter(
+      center.x,
+      center.y,
+      maxSize.width * cropScale,
+      maxSize.height * cropScale
+    );
+  } else {
+    state.cropRect = makeCropRectForMode(state.cropMode, center.x, center.y, cropScale);
+  }
+
+  renderCropUi();
+}
+
+function resetCropToFullFrame(): void {
+  if (!isCropEditable()) {
+    return;
+  }
+
+  state.cropMode = "full";
+  state.cropRect = { ...DEFAULT_CROP_RECT };
+  state.freeCropSizeLocked = false;
+  renderCropUi();
+}
+
+function renderCropUi(): void {
+  const editable = isCropEditable();
+  const active = editable && state.cropMode !== "full";
+  const freeActive = active && state.cropMode === "free";
+  const cropScale = getCropScalePercent();
+  const pixelSize = getCropPixelSize();
+  const minimumPixelSize = getMinimumCropPixelSize();
+
+  cropOverlay.classList.toggle("is-visible", active);
+  cropOverlay.setAttribute("aria-hidden", String(!active));
+  cropBox.style.setProperty("--crop-x", `${state.cropRect.x * 100}%`);
+  cropBox.style.setProperty("--crop-y", `${state.cropRect.y * 100}%`);
+  cropBox.style.setProperty("--crop-width", `${state.cropRect.width * 100}%`);
+  cropBox.style.setProperty("--crop-height", `${state.cropRect.height * 100}%`);
+  cropBox.setAttribute("aria-label", `${formatCropSummary()} crop area`);
+
+  for (const button of cropModeButtons) {
+    const isSelected = button.dataset.cropMode === state.cropMode;
+    button.classList.toggle("is-selected", isSelected);
+    button.setAttribute("aria-pressed", String(isSelected));
+    button.disabled = !editable;
+  }
+
+  cropSizeInput.value = String(cropScale);
+  cropSizeInput.disabled = !active;
+  freeSizeFields.classList.toggle("is-visible", freeActive);
+  freeCropWidthInput.value = String(pixelSize.width);
+  freeCropHeightInput.value = String(pixelSize.height);
+  freeCropWidthInput.min = String(minimumPixelSize.width);
+  freeCropHeightInput.min = String(minimumPixelSize.height);
+  freeCropWidthInput.max = String(Math.max(minimumPixelSize.width, state.width));
+  freeCropHeightInput.max = String(Math.max(minimumPixelSize.height, state.height));
+  freeCropWidthInput.disabled = !freeActive;
+  freeCropHeightInput.disabled = !freeActive;
+  freeSizeState.textContent = state.freeCropSizeLocked ? "Locked" : "Free";
+  freeSizeState.classList.toggle("is-locked", state.freeCropSizeLocked);
+  resetCropButton.disabled = !active;
+  cropBox.tabIndex = active ? 0 : -1;
+  cropSummary.textContent = editable ? formatCropSummary() : "Full frame";
+  cropMessage.textContent = !editable
+    ? "Load a video to crop the preview frame."
+    : state.freeCropSizeLocked
+      ? "Fixed free size is active. Move the crop area from its center."
+      : active
+        ? "Drag the crop area or handles to frame the output."
+      : "Full frame is selected. Choose an aspect ratio to crop.";
+}
+
+function applyFreeCropSizeFromInputs(): void {
+  if (!isCropEditable() || state.cropMode !== "free") {
+    renderCropUi();
+    return;
+  }
+
+  const minimumPixelSize = getMinimumCropPixelSize();
+  const currentPixelSize = getCropPixelSize();
+  const width = clampPixelInput(
+    freeCropWidthInput.value,
+    currentPixelSize.width,
+    minimumPixelSize.width,
+    state.width
+  );
+  const height = clampPixelInput(
+    freeCropHeightInput.value,
+    currentPixelSize.height,
+    minimumPixelSize.height,
+    state.height
+  );
+  const center = getCropCenter(state.cropRect);
+
+  state.cropRect = makeCropRectFromCenter(center.x, center.y, width / state.width, height / state.height);
+  state.freeCropSizeLocked = true;
+  renderCropUi();
+}
+
+function startCropDrag(event: PointerEvent): void {
+  if (!isCropEditable() || state.cropMode === "full" || event.button !== 0) {
+    return;
+  }
+
+  const stageRect = videoStage.getBoundingClientRect();
+
+  if (stageRect.width <= 0 || stageRect.height <= 0) {
+    return;
+  }
+
+  const handleElement = (event.target as HTMLElement).closest<HTMLElement>("[data-crop-handle]");
+  const handle = (handleElement?.dataset.cropHandle as CropHandle | undefined) ?? "move";
+
+  cropDragSession = {
+    handle,
+    pointerId: event.pointerId,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startRect: { ...state.cropRect },
+    stageRect
+  };
+
+  cropBox.setPointerCapture(event.pointerId);
+  cropBox.classList.add("is-dragging");
+  cropBox.focus();
+  event.preventDefault();
+}
+
+function handleCropDragMove(event: PointerEvent): void {
+  if (!cropDragSession || event.pointerId !== cropDragSession.pointerId) {
+    return;
+  }
+
+  const deltaX = (event.clientX - cropDragSession.startClientX) / cropDragSession.stageRect.width;
+  const deltaY = (event.clientY - cropDragSession.startClientY) / cropDragSession.stageRect.height;
+
+  if (cropDragSession.handle === "move") {
+    state.cropRect = clampCropRect({
+      ...cropDragSession.startRect,
+      x: cropDragSession.startRect.x + deltaX,
+      y: cropDragSession.startRect.y + deltaY
+    });
+  } else if (state.cropMode === "free") {
+    state.freeCropSizeLocked = false;
+    state.cropRect = resizeFreeCropRect(cropDragSession, deltaX, deltaY);
+  } else {
+    state.cropRect = resizeFixedCropRect(cropDragSession, event.clientX, event.clientY);
+  }
+
+  renderCropUi();
+  event.preventDefault();
+}
+
+function endCropDrag(event: PointerEvent): void {
+  if (!cropDragSession || event.pointerId !== cropDragSession.pointerId) {
+    return;
+  }
+
+  if (cropBox.hasPointerCapture(event.pointerId)) {
+    cropBox.releasePointerCapture(event.pointerId);
+  }
+
+  cropDragSession = null;
+  cropBox.classList.remove("is-dragging");
+}
+
+function handleCropKeyboard(event: KeyboardEvent): void {
+  if (!isCropEditable() || state.cropMode === "full") {
+    return;
+  }
+
+  const moveStep = event.shiftKey ? 0.03 : 0.01;
+  const scaleStep = event.shiftKey ? 5 : 2;
+  let nextRect = state.cropRect;
+
+  if (event.key === "ArrowLeft") {
+    nextRect = clampCropRect({ ...state.cropRect, x: state.cropRect.x - moveStep });
+  } else if (event.key === "ArrowRight") {
+    nextRect = clampCropRect({ ...state.cropRect, x: state.cropRect.x + moveStep });
+  } else if (event.key === "ArrowUp") {
+    nextRect = clampCropRect({ ...state.cropRect, y: state.cropRect.y - moveStep });
+  } else if (event.key === "ArrowDown") {
+    nextRect = clampCropRect({ ...state.cropRect, y: state.cropRect.y + moveStep });
+  } else if (event.key === "+" || event.key === "=") {
+    setCropScale(getCropScalePercent() + scaleStep);
+    event.preventDefault();
+    return;
+  } else if (event.key === "-" || event.key === "_") {
+    setCropScale(getCropScalePercent() - scaleStep);
+    event.preventDefault();
+    return;
+  } else {
+    return;
+  }
+
+  state.cropRect = nextRect;
+  renderCropUi();
+  event.preventDefault();
+}
+
+function resizeFreeCropRect(session: CropDragSession, deltaX: number, deltaY: number): CropRect {
+  const start = session.startRect;
+  const startRight = start.x + start.width;
+  const startBottom = start.y + start.height;
+  let left = start.x;
+  let right = startRight;
+  let top = start.y;
+  let bottom = startBottom;
+
+  if (session.handle.includes("w")) {
+    left = clamp(start.x + deltaX, 0, startRight - MIN_CROP_SIZE_RATIO);
+  }
+
+  if (session.handle.includes("e")) {
+    right = clamp(startRight + deltaX, start.x + MIN_CROP_SIZE_RATIO, 1);
+  }
+
+  if (session.handle.includes("n")) {
+    top = clamp(start.y + deltaY, 0, startBottom - MIN_CROP_SIZE_RATIO);
+  }
+
+  if (session.handle.includes("s")) {
+    bottom = clamp(startBottom + deltaY, start.y + MIN_CROP_SIZE_RATIO, 1);
+  }
+
+  return clampCropRect({
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top
+  });
+}
+
+function resizeFixedCropRect(
+  session: CropDragSession,
+  clientX: number,
+  clientY: number
+): CropRect {
+  const center = getCropCenter(session.startRect);
+  const pointerX = (clientX - session.stageRect.left) / session.stageRect.width;
+  const pointerY = (clientY - session.stageRect.top) / session.stageRect.height;
+  const horizontalScale = session.handle.includes("e") || session.handle.includes("w")
+    ? Math.abs(pointerX - center.x) / Math.max(session.startRect.width / 2, 0.001)
+    : 1;
+  const verticalScale = session.handle.includes("n") || session.handle.includes("s")
+    ? Math.abs(pointerY - center.y) / Math.max(session.startRect.height / 2, 0.001)
+    : 1;
+  const maxSize = getMaxCropSizeForMode(state.cropMode);
+  const startScale = session.startRect.width / maxSize.width;
+  const minimumScale = getMinimumCropScale(maxSize);
+  const nextScale = clamp(startScale * Math.max(horizontalScale, verticalScale), minimumScale, 1);
+
+  return makeCropRectForMode(state.cropMode, center.x, center.y, nextScale);
+}
+
+function isCropEditable(): boolean {
+  return state.canPreviewDirectly && state.width > 0 && state.height > 0;
+}
+
+function makeCropRectForMode(
+  mode: CropMode,
+  centerX: number,
+  centerY: number,
+  scale: number
+): CropRect {
+  const maxSize = getMaxCropSizeForMode(mode);
+  const cropScale = clamp(scale, getMinimumCropScale(maxSize), 1);
+  return makeCropRectFromCenter(
+    centerX,
+    centerY,
+    maxSize.width * cropScale,
+    maxSize.height * cropScale
+  );
+}
+
+function makeCropRectFromCenter(
+  centerX: number,
+  centerY: number,
+  width: number,
+  height: number
+): CropRect {
+  return clampCropRect({
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height
+  });
+}
+
+function getMaxCropSizeForMode(mode: CropMode): { width: number; height: number } {
+  const targetRatio = getCropTargetRatio(mode);
+
+  if (!targetRatio || state.width <= 0 || state.height <= 0) {
+    return { width: 1, height: 1 };
+  }
+
+  const sourceRatio = state.width / state.height;
+  return getMaxCropSizeForNormalizedAspect(targetRatio / sourceRatio);
+}
+
+function getMaxCropSizeForNormalizedAspect(normalizedAspect: number): {
+  width: number;
+  height: number;
+} {
+  if (!Number.isFinite(normalizedAspect) || normalizedAspect <= 0) {
+    return { width: 1, height: 1 };
+  }
+
+  if (normalizedAspect >= 1) {
+    return { width: 1, height: 1 / normalizedAspect };
+  }
+
+  return { width: normalizedAspect, height: 1 };
+}
+
+function getCropTargetRatio(mode: CropMode): number | null {
+  return CROP_MODES.find((cropMode) => cropMode.mode === mode)?.ratio ?? null;
+}
+
+function getCropCenter(rect: CropRect): { x: number; y: number } {
+  return {
+    x: rect.x + rect.width / 2,
+    y: rect.y + rect.height / 2
+  };
+}
+
+function getCropPixelSize(): { width: number; height: number } {
+  if (state.width <= 0 || state.height <= 0) {
+    return { width: 0, height: 0 };
+  }
+
+  return {
+    width: Math.round(state.cropRect.width * state.width),
+    height: Math.round(state.cropRect.height * state.height)
+  };
+}
+
+function getMinimumCropPixelSize(): { width: number; height: number } {
+  return {
+    width: Math.max(1, Math.ceil(state.width * MIN_CROP_SIZE_RATIO)),
+    height: Math.max(1, Math.ceil(state.height * MIN_CROP_SIZE_RATIO))
+  };
+}
+
+function clampPixelInput(value: string, fallback: number, min: number, max: number): number {
+  const parsedValue = Math.round(Number(value));
+  const safeValue = Number.isFinite(parsedValue) ? parsedValue : fallback;
+  return clamp(safeValue, min, max);
+}
+
+function getCropScalePercent(): number {
+  if (state.cropMode === "full") {
+    return 100;
+  }
+
+  const maxSize = state.cropMode === "free"
+    ? getMaxCropSizeForNormalizedAspect(state.cropRect.width / state.cropRect.height)
+    : getMaxCropSizeForMode(state.cropMode);
+  const scale = Math.min(state.cropRect.width / maxSize.width, state.cropRect.height / maxSize.height);
+
+  return Math.round(clamp(scale, MIN_CROP_SIZE_RATIO, 1) * 100);
+}
+
+function getMinimumCropScale(maxSize: { width: number; height: number }): number {
+  return clamp(
+    Math.max(MIN_CROP_SIZE_RATIO / maxSize.width, MIN_CROP_SIZE_RATIO / maxSize.height),
+    MIN_CROP_SIZE_RATIO,
+    1
+  );
+}
+
+function clampCropRect(rect: CropRect): CropRect {
+  const width = clamp(rect.width, MIN_CROP_SIZE_RATIO, 1);
+  const height = clamp(rect.height, MIN_CROP_SIZE_RATIO, 1);
+
+  return {
+    x: clamp(rect.x, 0, 1 - width),
+    y: clamp(rect.y, 0, 1 - height),
+    width,
+    height
+  };
+}
+
+function formatCropSummary(): string {
+  if (!isCropEditable() || state.cropMode === "full") {
+    return "Full frame";
+  }
+
+  const cropWidth = Math.round(state.cropRect.width * state.width);
+  const cropHeight = Math.round(state.cropRect.height * state.height);
+  return `${getCropModeLabel(state.cropMode)} ${cropWidth} x ${cropHeight}`;
+}
+
+function getCropModeLabel(mode: CropMode): string {
+  return CROP_MODES.find((cropMode) => cropMode.mode === mode)?.label ?? "Crop";
 }
 
 async function generateTrimThumbnails(): Promise<void> {
@@ -931,6 +1564,9 @@ function resetSource(): void {
   state.canPreviewDirectly = false;
   state.trimStart = 0;
   state.trimEnd = 0;
+  state.cropMode = "full";
+  state.cropRect = { ...DEFAULT_CROP_RECT };
+  state.freeCropSizeLocked = false;
   state.thumbnailGenerationId += 1;
 
   fileInput.value = "";
@@ -947,7 +1583,9 @@ function resetSource(): void {
   metaSize.textContent = "--";
   setPreviewControlsEnabled(false);
   setTrimControlsEnabled(false);
+  setCropControlsEnabled(false);
   renderTrimUi();
+  renderCropUi();
   updatePlaybackUi();
 }
 
@@ -955,7 +1593,10 @@ function resetVideoElement(): void {
   video.pause();
   video.removeAttribute("src");
   video.load();
-  video.classList.remove("is-loaded", "fit-width", "fit-height");
+  video.classList.remove("is-loaded");
+  videoStage.classList.remove("is-loaded", "fit-width", "fit-height");
+  cropDragSession = null;
+  cropBox.classList.remove("is-dragging");
 }
 
 function revokeSourceUrl(): void {
