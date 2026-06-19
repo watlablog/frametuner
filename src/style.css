@@ -1334,6 +1334,20 @@ input:disabled {
 }
 
 .export-strip .message {
+  min-height: 1.1rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.export-download {
+  display: inline-flex;
+  justify-content: center;
+  width: 100%;
+  min-height: 31px;
+}
+
+.export-download.is-hidden {
   display: none;
 }
 

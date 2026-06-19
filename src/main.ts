@@ -1,5 +1,7 @@
 import "./style.css";
 
+import type { FFmpeg, LogEvent, ProgressEvent } from "@ffmpeg/ffmpeg";
+
 type ControlTile = {
   title: string;
   value: string;
@@ -37,6 +39,7 @@ type TrimEdge = "start" | "end";
 type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
 type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 type ResizeMode = "original" | "custom";
+type ExportJobStatus = "idle" | "loading-ffmpeg" | "running" | "done" | "error";
 
 type GifFrame = {
   canvas: HTMLCanvasElement;
@@ -94,6 +97,55 @@ type CropDragSession = {
   stageRect: DOMRect;
 };
 
+type ExportJobState = {
+  status: ExportJobStatus;
+  progress: number;
+  message: string;
+  outputUrl: string | null;
+  outputFileName: string | null;
+};
+
+type ExportCommandPlan = {
+  inputName: string;
+  outputName: string;
+  outputFileName: string;
+  args: string[];
+};
+
+type FileSystemWritableFileStreamLike = {
+  write(data: Blob): Promise<void>;
+  close(): Promise<void>;
+};
+
+type FileSystemFileHandleLike = {
+  name?: string;
+  createWritable(): Promise<FileSystemWritableFileStreamLike>;
+};
+
+type SaveFilePickerOptionsLike = {
+  suggestedName?: string;
+  types?: Array<{
+    description: string;
+    accept: Record<string, string[]>;
+  }>;
+  excludeAcceptAllOption?: boolean;
+};
+
+type SaveFilePickerWindow = Window & typeof globalThis & {
+  showSaveFilePicker?: (options?: SaveFilePickerOptionsLike) => Promise<FileSystemFileHandleLike>;
+};
+
+type ExportSaveTarget =
+  | {
+      kind: "native";
+      handle: FileSystemFileHandleLike;
+      fileName: string;
+    }
+  | {
+      kind: "download";
+      fileName: string;
+    };
+
 const TRIM_SLIDER_MAX = 1000;
 const MIN_TRIM_SECONDS = 0.1;
 const TRIM_THUMBNAIL_COUNT = 12;
@@ -104,6 +156,9 @@ const MIN_CROP_SIZE_RATIO = 0.12;
 const MIN_OUTPUT_DIMENSION = 2;
 const MAX_OUTPUT_DIMENSION = 7680;
 const FALLBACK_GIF_FRAME_DURATION_MS = 100;
+const FFMPEG_CORE_URL = "/ffmpeg/ffmpeg-core.js";
+const FFMPEG_WASM_URL = "/ffmpeg/ffmpeg-core.wasm";
+const EXPORT_OUTPUT_NAME = "output.mp4";
 const DEFAULT_CROP_RECT: CropRect = {
   x: 0,
   y: 0,
@@ -203,6 +258,14 @@ const state: PreviewState = {
   thumbnailDataUrls: [],
   thumbnailGenerationId: 0,
   activeTrimEdge: null
+};
+
+const exportState: ExportJobState = {
+  status: "idle",
+  progress: 0,
+  message: "Load a video to export.",
+  outputUrl: null,
+  outputFileName: null
 };
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -508,7 +571,7 @@ root.innerHTML = `
               <span class="section-kicker">Output</span>
               <h2 id="export-title">Export</h2>
             </div>
-            <span class="status-pill status-pill-muted">Not ready</span>
+            <span class="status-pill status-pill-muted" data-export-status>Not ready</span>
           </div>
 
           <div class="export-grid">
@@ -530,15 +593,18 @@ root.innerHTML = `
                 <option>Keep audio</option>
               </select>
             </label>
-            <button class="button primary export-button" type="button" disabled>
+            <button class="button primary export-button" type="button" data-export-button disabled>
               Export video
             </button>
           </div>
 
           <div class="progress-shell" aria-label="Export progress">
-            <span class="progress-bar" style="width: 0%"></span>
+            <span class="progress-bar" data-export-progress style="width: 0%"></span>
           </div>
-          <p class="message">Export will be connected after preview and trimming are stable.</p>
+          <p class="message" data-export-message>Load a video to export.</p>
+          <a class="button export-download is-hidden" href="#" download data-export-download>
+            Download MP4
+          </a>
         </section>
       </aside>
     </main>
@@ -589,9 +655,17 @@ const resizeWidthInput = query<HTMLInputElement>("[data-resize-width]");
 const resizeHeightInput = query<HTMLInputElement>("[data-resize-height]");
 const resizeAspectInput = query<HTMLInputElement>("[data-resize-aspect]");
 const resizeModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-resize-mode]"));
+const exportStatus = query<HTMLElement>("[data-export-status]");
+const exportButton = query<HTMLButtonElement>("[data-export-button]");
+const exportProgress = query<HTMLElement>("[data-export-progress]");
+const exportMessage = query<HTMLElement>("[data-export-message]");
+const exportDownload = query<HTMLAnchorElement>("[data-export-download]");
 let trimFilmstripHideTimer: number | null = null;
 let cropDragSession: CropDragSession | null = null;
 let gifPlaybackTimer: number | null = null;
+let ffmpegInstance: FFmpeg | null = null;
+let ffmpegLoadPromise: Promise<FFmpeg> | null = null;
+let latestFfmpegLog = "";
 
 chooseFileButton.addEventListener("click", () => fileInput.click());
 
@@ -742,11 +816,15 @@ resizeHeightInput.addEventListener("change", () => {
 
 resizeAspectInput.addEventListener("change", () => {
   state.resizeAspectLocked = resizeAspectInput.checked;
+  invalidateExportOutput();
   renderResizeUi();
 });
 
 cropBox.addEventListener("pointerdown", startCropDrag);
 cropBox.addEventListener("keydown", handleCropKeyboard);
+exportButton.addEventListener("click", () => {
+  void exportCurrentVideo();
+});
 
 for (const button of resetSourceButtons) {
   button.addEventListener("click", resetSource);
@@ -784,6 +862,7 @@ function isGifFile(file: File): boolean {
 
 function loadSourceFile(file: File): void {
   revokeSourceUrl();
+  resetExportState();
   stopGifPlayback();
   state.sourceKind = "empty";
   resetVideoElement();
@@ -826,6 +905,7 @@ function loadSourceFile(file: File): void {
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
+  renderExportUi();
 
   if (isGif) {
     void loadGifSource(file, generationId);
@@ -891,6 +971,7 @@ function handlePreviewLoadFailure(): void {
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
+  renderExportUi();
   updatePlaybackUi();
 }
 
@@ -912,6 +993,7 @@ function renderLoadedState(): void {
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
+  renderExportUi();
   updatePlaybackUi();
 }
 
@@ -1307,6 +1389,7 @@ function setTrimRange(nextStart: number, nextEnd: number, editedEdge: "start" | 
   state.trimEnd = roundTime(end);
 
   seekPreviewToTime(video.currentTime);
+  invalidateExportOutput();
 
   renderTrimUi();
   updatePlaybackUi();
@@ -1338,6 +1421,7 @@ function setGifTrimRange(nextStart: number, nextEnd: number, editedEdge: "start"
     setGifCurrentTime(editedEdge === "end" ? state.trimEnd : state.trimStart, editedEdge === "end");
   }
 
+  invalidateExportOutput();
   renderTrimUi();
   updatePlaybackUi();
 }
@@ -1440,6 +1524,7 @@ function setCropMode(mode: CropMode): void {
     state.cropRect = makeCropRectForMode(mode, center.x, center.y, cropScale);
   }
 
+  invalidateExportOutput();
   renderCropUi();
 }
 
@@ -1468,6 +1553,7 @@ function setCropScale(percent: number): void {
     state.cropRect = makeCropRectForMode(state.cropMode, center.x, center.y, cropScale);
   }
 
+  invalidateExportOutput();
   renderCropUi();
 }
 
@@ -1536,6 +1622,7 @@ function applyFreeCropSizeFromInputs(): void {
 
   state.cropRect = makeCropRectFromCenter(center.x, center.y, width / state.width, height / state.height);
   state.freeCropSizeLocked = true;
+  invalidateExportOutput();
   renderCropUi();
 }
 
@@ -1589,6 +1676,7 @@ function handleCropDragMove(event: PointerEvent): void {
     state.cropRect = resizeFixedCropRect(cropDragSession, event.clientX, event.clientY);
   }
 
+  invalidateExportOutput();
   renderCropUi();
   event.preventDefault();
 }
@@ -1636,6 +1724,7 @@ function handleCropKeyboard(event: KeyboardEvent): void {
   }
 
   state.cropRect = nextRect;
+  invalidateExportOutput();
   renderCropUi();
   event.preventDefault();
 }
@@ -1865,6 +1954,7 @@ function setResizeMode(mode: ResizeMode): void {
     state.resizeHeight = presetSize.height;
   }
 
+  invalidateExportOutput();
   renderResizeUi();
 }
 
@@ -1893,6 +1983,7 @@ function applyCustomResizeFromInput(changedDimension: "width" | "height"): void 
 
   state.resizeWidth = clamp(width, MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
   state.resizeHeight = clamp(height, MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
+  invalidateExportOutput();
   renderResizeUi();
 }
 
@@ -1919,6 +2010,409 @@ function renderResizeUi(): void {
   sizeSummary.textContent = editable
     ? `${getResizeModeLabel(state.resizeMode)} ${outputSize.width} x ${outputSize.height}`
     : "Original";
+}
+
+async function exportCurrentVideo(): Promise<void> {
+  if (!canExportVideo()) {
+    return;
+  }
+
+  const sourceFile = state.sourceFile;
+
+  if (!sourceFile) {
+    return;
+  }
+
+  const commandPlan = buildExportCommand(sourceFile);
+  const saveTarget = await requestExportSaveTarget(commandPlan.outputFileName);
+
+  if (!saveTarget) {
+    exportState.status = "idle";
+    exportState.progress = 0;
+    exportState.message = "Export canceled.";
+    renderExportUi();
+    return;
+  }
+
+  resetExportOutput();
+  exportState.status = "loading-ffmpeg";
+  exportState.progress = 0;
+  exportState.message = "Loading FFmpeg...";
+  latestFfmpegLog = "";
+  renderExportUi();
+
+  let ffmpeg: FFmpeg | null = null;
+
+  try {
+    ffmpeg = await getLoadedFfmpeg();
+    const { fetchFile } = await import("@ffmpeg/util");
+
+    exportState.status = "running";
+    exportState.progress = 0.04;
+    exportState.message = "Preparing source...";
+    renderExportUi();
+
+    await ffmpeg.writeFile(commandPlan.inputName, await fetchFile(sourceFile));
+
+    exportState.message = "Exporting MP4...";
+    renderExportUi();
+
+    const exitCode = await ffmpeg.exec(commandPlan.args);
+
+    if (exitCode !== 0) {
+      throw new Error(latestFfmpegLog || `FFmpeg exited with code ${exitCode}.`);
+    }
+
+    const exportedFile = await ffmpeg.readFile(commandPlan.outputName);
+    const exportedBytes = typeof exportedFile === "string"
+      ? new TextEncoder().encode(exportedFile)
+      : exportedFile;
+    const outputBytes = new Uint8Array(exportedBytes.byteLength);
+    outputBytes.set(exportedBytes);
+    const outputBlob = new Blob([outputBytes.buffer], { type: "video/mp4" });
+
+    exportState.message = "Saving MP4...";
+    renderExportUi();
+
+    if (saveTarget.kind === "native") {
+      await writeBlobToFileHandle(saveTarget.handle, outputBlob);
+      exportState.outputUrl = null;
+      exportState.outputFileName = saveTarget.fileName;
+      exportState.message = `Saved ${saveTarget.fileName}.`;
+    } else {
+      exportState.outputUrl = URL.createObjectURL(outputBlob);
+      exportState.outputFileName = saveTarget.fileName;
+      exportState.message = "Export complete. Use Download MP4 to save.";
+    }
+
+    exportState.status = "done";
+    exportState.progress = 1;
+  } catch (error) {
+    exportState.status = "error";
+    exportState.progress = 0;
+    exportState.message = error instanceof Error ? error.message : "Export failed.";
+  } finally {
+    if (ffmpeg) {
+      await safeDeleteFfmpegFile(ffmpeg, commandPlan.inputName);
+      await safeDeleteFfmpegFile(ffmpeg, commandPlan.outputName);
+    }
+
+    renderExportUi();
+  }
+}
+
+async function requestExportSaveTarget(fileName: string): Promise<ExportSaveTarget | null> {
+  const saveFilePicker = (window as SaveFilePickerWindow).showSaveFilePicker;
+
+  if (!saveFilePicker) {
+    return {
+      kind: "download",
+      fileName
+    };
+  }
+
+  try {
+    const handle = await saveFilePicker.call(window, {
+      suggestedName: fileName,
+      types: [
+        {
+          description: "MP4 video",
+          accept: {
+            "video/mp4": [".mp4"]
+          }
+        }
+      ],
+      excludeAcceptAllOption: false
+    });
+
+    return {
+      kind: "native",
+      handle,
+      fileName: handle.name || fileName
+    };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function writeBlobToFileHandle(handle: FileSystemFileHandleLike, blob: Blob): Promise<void> {
+  const writable = await handle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+function canExportVideo(): boolean {
+  return (
+    state.sourceKind === "video" &&
+    state.sourceFile !== null &&
+    state.canPreviewDirectly &&
+    state.duration > 0 &&
+    !isExportBusy()
+  );
+}
+
+function isExportBusy(): boolean {
+  return exportState.status === "loading-ffmpeg" || exportState.status === "running";
+}
+
+async function getLoadedFfmpeg(): Promise<FFmpeg> {
+  if (ffmpegInstance?.loaded) {
+    return ffmpegInstance;
+  }
+
+  if (ffmpegLoadPromise) {
+    return ffmpegLoadPromise;
+  }
+
+  ffmpegLoadPromise = (async () => {
+    const { FFmpeg } = await import("@ffmpeg/ffmpeg");
+    const { toBlobURL } = await import("@ffmpeg/util");
+    const [coreURL, wasmURL] = await Promise.all([
+      toBlobURL(FFMPEG_CORE_URL, "text/javascript"),
+      toBlobURL(FFMPEG_WASM_URL, "application/wasm")
+    ]);
+    const ffmpeg = new FFmpeg();
+    ffmpeg.on("log", handleFfmpegLog);
+    ffmpeg.on("progress", handleFfmpegProgress);
+    await ffmpeg.load({
+      coreURL,
+      wasmURL
+    });
+    ffmpegInstance = ffmpeg;
+    return ffmpeg;
+  })();
+
+  try {
+    return await ffmpegLoadPromise;
+  } catch (error) {
+    ffmpegLoadPromise = null;
+    throw error;
+  }
+}
+
+function handleFfmpegLog(event: LogEvent): void {
+  latestFfmpegLog = event.message;
+}
+
+function handleFfmpegProgress(event: ProgressEvent): void {
+  if (exportState.status !== "running") {
+    return;
+  }
+
+  exportState.progress = clamp(event.progress, 0.04, 0.98);
+  renderExportUi();
+}
+
+function buildExportCommand(sourceFile: File): ExportCommandPlan {
+  const inputName = `input.${getFileExtension(sourceFile.name)}`;
+  const outputName = EXPORT_OUTPUT_NAME;
+  const filters = buildVideoFilters();
+  const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+  const args = [
+    "-i", inputName,
+    "-ss", formatFfmpegSeconds(state.trimStart),
+    "-t", formatFfmpegSeconds(trimDuration),
+    "-map", "0:v:0",
+    "-map", "0:a?"
+  ];
+
+  if (filters.length > 0) {
+    args.push("-vf", filters.join(","));
+  }
+
+  args.push(
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "23",
+    "-pix_fmt", "yuv420p",
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-movflags", "+faststart",
+    outputName
+  );
+
+  return {
+    inputName,
+    outputName,
+    outputFileName: getExportFileName(sourceFile.name),
+    args
+  };
+}
+
+function buildVideoFilters(): string[] {
+  const filters: string[] = [];
+  const crop = getExportCropRect();
+  let baseWidth = state.width;
+  let baseHeight = state.height;
+
+  if (crop) {
+    filters.push(`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`);
+    baseWidth = crop.width;
+    baseHeight = crop.height;
+  }
+
+  const resizeSize = getCurrentResizeSize();
+  const outputWidth = clampOutputSizeValue(resizeSize.width || baseWidth);
+  const outputHeight = clampOutputSizeValue(resizeSize.height || baseHeight);
+
+  if (outputWidth !== baseWidth || outputHeight !== baseHeight) {
+    filters.push(`scale=${outputWidth}:${outputHeight}`);
+  }
+
+  return filters;
+}
+
+function getExportCropRect(): { x: number; y: number; width: number; height: number } | null {
+  if (state.cropMode === "full" || state.width <= 0 || state.height <= 0) {
+    return null;
+  }
+
+  let x = floorEvenOffset(state.cropRect.x * state.width);
+  let y = floorEvenOffset(state.cropRect.y * state.height);
+  let width = floorEven(state.cropRect.width * state.width);
+  let height = floorEven(state.cropRect.height * state.height);
+
+  x = clamp(x, 0, Math.max(0, state.width - MIN_OUTPUT_DIMENSION));
+  y = clamp(y, 0, Math.max(0, state.height - MIN_OUTPUT_DIMENSION));
+  width = clamp(width, MIN_OUTPUT_DIMENSION, floorEven(state.width - x));
+  height = clamp(height, MIN_OUTPUT_DIMENSION, floorEven(state.height - y));
+
+  if (width >= floorEven(state.width) && height >= floorEven(state.height) && x === 0 && y === 0) {
+    return null;
+  }
+
+  return { x, y, width, height };
+}
+
+function renderExportUi(): void {
+  const busy = isExportBusy();
+  const canExport = canExportVideo();
+  exportButton.disabled = !canExport;
+  exportButton.textContent = busy ? "Exporting..." : "Export video";
+  exportProgress.style.width = `${Math.round(clamp(exportState.progress, 0, 1) * 100)}%`;
+
+  exportStatus.classList.remove("status-pill-muted", "status-pill-warning");
+
+  if (exportState.status === "done") {
+    exportStatus.textContent = "Done";
+  } else if (exportState.status === "error") {
+    exportStatus.textContent = "Error";
+    exportStatus.classList.add("status-pill-warning");
+  } else if (busy) {
+    exportStatus.textContent = exportState.status === "loading-ffmpeg" ? "Loading" : "Running";
+  } else if (state.sourceKind === "video" && state.canPreviewDirectly) {
+    exportStatus.textContent = "Ready";
+  } else {
+    exportStatus.textContent = "Not ready";
+    exportStatus.classList.add("status-pill-muted");
+  }
+
+  exportMessage.textContent = getExportMessage();
+  exportDownload.classList.toggle("is-hidden", !exportState.outputUrl);
+
+  if (exportState.outputUrl && exportState.outputFileName) {
+    exportDownload.href = exportState.outputUrl;
+    exportDownload.download = exportState.outputFileName;
+  } else {
+    exportDownload.removeAttribute("href");
+    exportDownload.removeAttribute("download");
+  }
+}
+
+function getExportMessage(): string {
+  if (exportState.status === "done" || exportState.status === "error" || isExportBusy()) {
+    return exportState.message;
+  }
+
+  if (exportState.status === "idle" && exportState.message === "Export canceled.") {
+    return exportState.message;
+  }
+
+  if (state.sourceKind === "gif") {
+    return "GIF export is not available yet.";
+  }
+
+  if (state.sourceKind === "video" && state.canPreviewDirectly) {
+    return "Ready to export MP4.";
+  }
+
+  return "Load a video to export.";
+}
+
+function resetExportState(): void {
+  resetExportOutput();
+  exportState.status = "idle";
+  exportState.progress = 0;
+  exportState.message = "Load a video to export.";
+  renderExportUi();
+}
+
+function invalidateExportOutput(): void {
+  if (isExportBusy()) {
+    return;
+  }
+
+  if (!exportState.outputUrl && exportState.status === "idle") {
+    renderExportUi();
+    return;
+  }
+
+  resetExportOutput();
+  exportState.status = "idle";
+  exportState.progress = 0;
+  exportState.message = "Load a video to export.";
+  renderExportUi();
+}
+
+function resetExportOutput(): void {
+  if (exportState.outputUrl) {
+    URL.revokeObjectURL(exportState.outputUrl);
+  }
+
+  exportState.outputUrl = null;
+  exportState.outputFileName = null;
+}
+
+async function safeDeleteFfmpegFile(ffmpeg: FFmpeg, fileName: string): Promise<void> {
+  try {
+    await ffmpeg.deleteFile(fileName);
+  } catch {
+    // The file may not exist if FFmpeg failed before writing it.
+  }
+}
+
+function getFileExtension(fileName: string): string {
+  const extension = fileName.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return extension || "mp4";
+}
+
+function getExportFileName(fileName: string): string {
+  const baseName = fileName.replace(/\.[^/.]+$/, "") || "video";
+  return `${baseName}_frametuner.mp4`;
+}
+
+function formatFfmpegSeconds(value: number): string {
+  return Math.max(0, roundTime(value)).toFixed(3);
+}
+
+function floorEven(value: number): number {
+  if (!Number.isFinite(value)) {
+    return MIN_OUTPUT_DIMENSION;
+  }
+
+  return Math.max(MIN_OUTPUT_DIMENSION, Math.floor(value / 2) * 2);
+}
+
+function floorEvenOffset(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor(value / 2) * 2);
 }
 
 function isResizeEditable(): boolean {
@@ -2304,6 +2798,7 @@ function setPreviewControlsEnabled(enabled: boolean): void {
 
 function resetSource(): void {
   revokeSourceUrl();
+  resetExportState();
   stopGifPlayback();
   state.sourceKind = "empty";
   resetVideoElement();
@@ -2344,6 +2839,7 @@ function resetSource(): void {
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
+  renderExportUi();
   updatePlaybackUi();
 }
 

@@ -4,13 +4,22 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prepare:ffmpeg": "node scripts/copy-ffmpeg-core.mjs",
+    "predev": "npm run prepare:ffmpeg",
     "dev": "vite",
+    "prebuild": "npm run prepare:ffmpeg",
     "build": "tsc && vite build",
+    "prepreview": "npm run prepare:ffmpeg",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
     "vite": "^8.0.16"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2"
   }
 }
