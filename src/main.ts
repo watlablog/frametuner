@@ -30,7 +30,7 @@ type PreviewState = {
 type TrimEdge = "start" | "end";
 type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
 type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
-type ResizeMode = "original" | "1080p" | "720p" | "480p" | "custom";
+type ResizeMode = "original" | "custom";
 
 type CropRect = {
   x: number;
@@ -82,9 +82,6 @@ const RESIZE_PRESETS: Array<{
   shortEdge: number | null;
 }> = [
   { mode: "original", label: "Original", shortEdge: null },
-  { mode: "1080p", label: "1080p", shortEdge: 1080 },
-  { mode: "720p", label: "720p", shortEdge: 720 },
-  { mode: "480p", label: "480p", shortEdge: 480 },
   { mode: "custom", label: "Custom", shortEdge: null }
 ];
 
@@ -114,6 +111,13 @@ const PLAYER_ICONS = {
 } as const;
 
 type PlayerIconName = keyof typeof PLAYER_ICONS;
+
+const FOLDER_OPEN_ICON = `
+  <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M3.5 6.8A2.3 2.3 0 0 1 5.8 4.5h4.3l2.1 2.2h6A2.3 2.3 0 0 1 20.5 9v1.1H7.2a2.2 2.2 0 0 0-2.1 1.5l-1.6 4.6V6.8Z" />
+    <path d="M5.2 12.3a1.8 1.8 0 0 1 1.7-1.2h13.6a1 1 0 0 1 .9 1.3l-2 5.8a1.8 1.8 0 0 1-1.7 1.2H4.1a1 1 0 0 1-.9-1.3l2-5.8Z" />
+  </svg>
+`;
 
 const initialControlTiles: ControlTile[] = [
   {
@@ -172,13 +176,12 @@ root.innerHTML = `
       <section class="panel media-panel" aria-labelledby="preview-title">
         <div class="upload-bar" tabindex="0" aria-label="Video file drop area">
           <div class="upload-copy">
-            <span class="section-kicker">Source</span>
             <strong data-upload-title>Drop a video file here</strong>
-            <span data-upload-copy>Your video stays in this browser.</span>
           </div>
           <input class="file-input" id="source-file" type="file" accept="video/*,image/gif" />
           <button class="button primary compact-button" type="button" data-choose-file>
-            Choose file
+            ${FOLDER_OPEN_ICON}
+            <span>Open</span>
           </button>
         </div>
 
@@ -236,7 +239,7 @@ root.innerHTML = `
           </label>
         </div>
 
-        <dl class="media-meta" data-media-meta aria-label="Loaded video metadata">
+        <dl class="media-meta" data-media-meta aria-label="Video metadata">
           <div>
             <dt>File</dt>
             <dd data-meta-file>No source loaded</dd>
@@ -256,22 +259,11 @@ root.innerHTML = `
         </dl>
       </section>
 
-      <aside class="panel control-panel" aria-labelledby="controls-title">
-        <div class="panel-heading compact-heading">
-          <div>
-            <span class="section-kicker">Inspector</span>
-            <h2 id="controls-title">Edit controls</h2>
-          </div>
-          <span class="status-pill status-pill-muted" data-inspector-status>Idle</span>
-        </div>
-
+      <aside class="panel control-panel" aria-label="Edit controls">
         <section class="trim-panel" aria-labelledby="trim-title">
           <div class="trim-heading">
-            <div>
-              <span class="section-kicker">Time</span>
-              <h3 id="trim-title">Trim range</h3>
-            </div>
-            <span data-trim-summary>00:00 - 00:00</span>
+            <h3 id="trim-title">Trim range</h3>
+            <span data-trim-summary>0:00.0 - 0:00.0 / 0.0s</span>
           </div>
 
           <div class="trim-slider" data-trim-slider>
@@ -314,16 +306,11 @@ root.innerHTML = `
               disabled
             />
           </div>
-
-          <p class="trim-message" data-trim-message>Load a video to choose a time range.</p>
         </section>
 
         <section class="crop-panel" aria-labelledby="crop-title">
           <div class="crop-heading">
-            <div>
-              <span class="section-kicker">Frame</span>
-              <h3 id="crop-title">Crop</h3>
-            </div>
+            <h3 id="crop-title">Crop</h3>
             <span data-crop-summary>Full frame</span>
           </div>
 
@@ -376,36 +363,33 @@ root.innerHTML = `
             </label>
             <span class="free-size-state" data-free-size-state>Free</span>
           </div>
-
-          <div class="crop-actions">
-            <button class="button" type="button" data-reset-crop disabled>Reset crop</button>
-          </div>
-
-          <p class="crop-message" data-crop-message>Load a video to crop the preview frame.</p>
         </section>
 
         <section class="size-panel" aria-labelledby="size-title">
           <div class="size-heading">
-            <div>
-              <span class="section-kicker">Output</span>
-              <h3 id="size-title">Size</h3>
-            </div>
+            <h3 id="size-title">Resize</h3>
             <span data-size-summary>Original</span>
           </div>
 
-          <div class="size-preset-grid" role="group" aria-label="Output size preset">
-            ${RESIZE_PRESETS.map(
-              (preset) => `
-                <button
-                  class="size-preset-button"
-                  type="button"
-                  data-resize-mode="${preset.mode}"
-                  disabled
-                >
-                  ${preset.label}
-                </button>
-              `
-            ).join("")}
+          <div class="size-mode-row">
+            <div class="size-preset-grid" role="group" aria-label="Resize preset">
+              ${RESIZE_PRESETS.map(
+                (preset) => `
+                  <button
+                    class="size-preset-button"
+                    type="button"
+                    data-resize-mode="${preset.mode}"
+                    disabled
+                  >
+                    ${preset.label}
+                  </button>
+                `
+              ).join("")}
+            </div>
+            <label class="size-option">
+              <input type="checkbox" data-resize-aspect checked disabled />
+              <span>Keep aspect</span>
+            </label>
           </div>
 
           <div class="size-fields">
@@ -417,7 +401,7 @@ root.innerHTML = `
                 value="0"
                 step="2"
                 inputmode="numeric"
-                aria-label="Output width in pixels"
+                aria-label="Resize width in pixels"
                 data-resize-width
                 disabled
               />
@@ -430,23 +414,13 @@ root.innerHTML = `
                 value="0"
                 step="2"
                 inputmode="numeric"
-                aria-label="Output height in pixels"
+                aria-label="Resize height in pixels"
                 data-resize-height
                 disabled
               />
             </label>
           </div>
 
-          <label class="size-option">
-            <input type="checkbox" data-resize-aspect checked disabled />
-            <span>Keep aspect</span>
-          </label>
-
-          <div class="size-actions">
-            <button class="button" type="button" data-reset-size disabled>Reset size</button>
-          </div>
-
-          <p class="size-message" data-size-message>Load a video to resize the output frame.</p>
         </section>
 
         <div class="control-grid">
@@ -517,13 +491,11 @@ const fileInput = query<HTMLInputElement>("[data-choose-file] + input, #source-f
 const chooseFileButton = query<HTMLButtonElement>("[data-choose-file]");
 const uploadBar = query<HTMLDivElement>(".upload-bar");
 const uploadTitle = query<HTMLElement>("[data-upload-title]");
-const uploadCopy = query<HTMLElement>("[data-upload-copy]");
 const videoFrame = query<HTMLDivElement>(".video-frame");
 const videoStage = query<HTMLDivElement>("[data-video-stage]");
 const video = query<HTMLVideoElement>("[data-preview-video]");
 const placeholder = query<HTMLDivElement>("[data-video-placeholder]");
 const previewStatus = query<HTMLElement>("[data-preview-status]");
-const inspectorStatus = query<HTMLElement>("[data-inspector-status]");
 const playToggle = query<HTMLButtonElement>("[data-play-toggle]");
 const muteToggle = query<HTMLButtonElement>("[data-mute-toggle]");
 const seekInput = query<HTMLInputElement>("[data-seek]");
@@ -537,7 +509,6 @@ const trimSlider = query<HTMLDivElement>("[data-trim-slider]");
 const trimStartRange = query<HTMLInputElement>("[data-trim-start-range]");
 const trimEndRange = query<HTMLInputElement>("[data-trim-end-range]");
 const trimSummary = query<HTMLElement>("[data-trim-summary]");
-const trimMessage = query<HTMLElement>("[data-trim-message]");
 const trimFilmstrip = query<HTMLDivElement>("[data-trim-filmstrip]");
 const trimFilmstripTrack = query<HTMLDivElement>("[data-trim-filmstrip-track]");
 const trimStartMarkerTime = query<HTMLElement>("[data-trim-start-marker-time]");
@@ -547,21 +518,17 @@ const trimActiveTime = query<HTMLElement>("[data-trim-active-time]");
 const cropOverlay = query<HTMLDivElement>("[data-crop-overlay]");
 const cropBox = query<HTMLDivElement>("[data-crop-box]");
 const cropSummary = query<HTMLElement>("[data-crop-summary]");
-const cropMessage = query<HTMLElement>("[data-crop-message]");
 const cropSizeInput = query<HTMLInputElement>("[data-crop-size]");
 const freeSizeFields = query<HTMLDivElement>("[data-free-size-fields]");
 const freeCropWidthInput = query<HTMLInputElement>("[data-free-crop-width]");
 const freeCropHeightInput = query<HTMLInputElement>("[data-free-crop-height]");
 const freeSizeState = query<HTMLElement>("[data-free-size-state]");
 const cropModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-crop-mode]"));
-const resetCropButton = query<HTMLButtonElement>("[data-reset-crop]");
 const sizeSummary = query<HTMLElement>("[data-size-summary]");
-const sizeMessage = query<HTMLElement>("[data-size-message]");
 const resizeWidthInput = query<HTMLInputElement>("[data-resize-width]");
 const resizeHeightInput = query<HTMLInputElement>("[data-resize-height]");
 const resizeAspectInput = query<HTMLInputElement>("[data-resize-aspect]");
 const resizeModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-resize-mode]"));
-const resetSizeButton = query<HTMLButtonElement>("[data-reset-size]");
 let trimFilmstripHideTimer: number | null = null;
 let cropDragSession: CropDragSession | null = null;
 
@@ -627,7 +594,6 @@ video.addEventListener("error", () => {
   previewStatus.textContent = "Unsupported";
   previewStatus.classList.remove("status-pill-muted");
   previewStatus.classList.add("status-pill-warning");
-  inspectorStatus.textContent = "Preview failed";
   placeholder.classList.remove("is-hidden");
   video.classList.remove("is-loaded");
   videoStage.classList.remove("is-loaded", "fit-width", "fit-height");
@@ -636,7 +602,6 @@ video.addEventListener("error", () => {
   setResizeControlsEnabled(false);
   renderCropUi();
   renderResizeUi();
-  uploadCopy.textContent = "This file cannot be previewed directly by this browser.";
 });
 
 playToggle.addEventListener("click", async () => {
@@ -688,10 +653,6 @@ cropSizeInput.addEventListener("input", () => {
 freeCropWidthInput.addEventListener("change", applyFreeCropSizeFromInputs);
 freeCropHeightInput.addEventListener("change", applyFreeCropSizeFromInputs);
 
-resetCropButton.addEventListener("click", () => {
-  resetCropToFullFrame();
-});
-
 for (const button of resizeModeButtons) {
   button.addEventListener("click", () => {
     const mode = button.dataset.resizeMode as ResizeMode | undefined;
@@ -712,10 +673,6 @@ resizeHeightInput.addEventListener("change", () => {
 resizeAspectInput.addEventListener("change", () => {
   state.resizeAspectLocked = resizeAspectInput.checked;
   renderResizeUi();
-});
-
-resetSizeButton.addEventListener("click", () => {
-  resetResizeToOriginal();
 });
 
 cropBox.addEventListener("pointerdown", startCropDrag);
@@ -772,11 +729,9 @@ function loadSourceFile(file: File): void {
   state.thumbnailGenerationId += 1;
 
   uploadTitle.textContent = file.name;
-  uploadCopy.textContent = "Loading local preview metadata...";
   previewStatus.textContent = "Loading";
   previewStatus.classList.add("status-pill-muted");
   previewStatus.classList.remove("status-pill-warning");
-  inspectorStatus.textContent = "Loading";
   metaFile.textContent = file.name;
   metaResolution.textContent = "--";
   metaDuration.textContent = "--";
@@ -796,8 +751,6 @@ function loadSourceFile(file: File): void {
 function renderLoadedState(): void {
   previewStatus.textContent = "Ready";
   previewStatus.classList.remove("status-pill-muted", "status-pill-warning");
-  inspectorStatus.textContent = "Loaded";
-  uploadCopy.textContent = "Preview is running locally in this browser.";
   placeholder.classList.add("is-hidden");
   video.classList.add("is-loaded");
   metaResolution.textContent =
@@ -946,11 +899,8 @@ function renderTrimUi(): void {
 
   trimSummary.textContent =
     enabled
-      ? `${formatTime(state.trimStart)} - ${formatTime(state.trimEnd)}`
-      : "00:00 - 00:00";
-  trimMessage.textContent = enabled
-    ? `Selected range: ${formatPreciseSeconds(trimDuration)}`
-    : "Load a video to choose a time range.";
+      ? `${formatTrimTime(state.trimStart)} - ${formatTrimTime(state.trimEnd)} / ${formatSecondsInput(trimDuration)}s`
+      : "0:00.0 - 0:00.0 / 0.0s";
   trimStartMarkerTime.textContent = enabled ? formatMarkerTime(state.trimStart) : "0.0s";
   trimEndMarkerTime.textContent = enabled ? formatMarkerTime(state.trimEnd) : "0.0s";
   trimActiveLabel.textContent = state.activeTrimEdge === "end" ? "End" : "Start";
@@ -989,7 +939,6 @@ function setCropControlsEnabled(enabled: boolean): void {
   cropSizeInput.disabled = !enabled || state.cropMode === "full";
   freeCropWidthInput.disabled = !enabled || state.cropMode !== "free";
   freeCropHeightInput.disabled = !enabled || state.cropMode !== "free";
-  resetCropButton.disabled = !enabled || state.cropMode === "full";
   cropBox.tabIndex = enabled && state.cropMode !== "full" ? 0 : -1;
 }
 
@@ -1047,17 +996,6 @@ function setCropScale(percent: number): void {
   renderCropUi();
 }
 
-function resetCropToFullFrame(): void {
-  if (!isCropEditable()) {
-    return;
-  }
-
-  state.cropMode = "full";
-  state.cropRect = { ...DEFAULT_CROP_RECT };
-  state.freeCropSizeLocked = false;
-  renderCropUi();
-}
-
 function renderCropUi(): void {
   const editable = isCropEditable();
   const active = editable && state.cropMode !== "full";
@@ -1094,16 +1032,8 @@ function renderCropUi(): void {
   freeCropHeightInput.disabled = !freeActive;
   freeSizeState.textContent = state.freeCropSizeLocked ? "Locked" : "Free";
   freeSizeState.classList.toggle("is-locked", state.freeCropSizeLocked);
-  resetCropButton.disabled = !active;
   cropBox.tabIndex = active ? 0 : -1;
   cropSummary.textContent = editable ? formatCropSummary() : "Full frame";
-  cropMessage.textContent = !editable
-    ? "Load a video to crop the preview frame."
-    : state.freeCropSizeLocked
-      ? "Fixed free size is active. Move the crop area from its center."
-      : active
-        ? "Drag the crop area or handles to frame the output."
-      : "Full frame is selected. Choose an aspect ratio to crop.";
   renderResizeUi();
 }
 
@@ -1441,7 +1371,6 @@ function setResizeControlsEnabled(enabled: boolean): void {
   resizeWidthInput.disabled = !customEnabled;
   resizeHeightInput.disabled = !customEnabled;
   resizeAspectInput.disabled = !customEnabled;
-  resetSizeButton.disabled = !enabled || state.resizeMode === "original";
 }
 
 function setResizeMode(mode: ResizeMode): void {
@@ -1492,23 +1421,9 @@ function applyCustomResizeFromInput(changedDimension: "width" | "height"): void 
   renderResizeUi();
 }
 
-function resetResizeToOriginal(): void {
-  if (!isResizeEditable()) {
-    return;
-  }
-
-  const baseSize = getBaseFrameSize();
-  state.resizeMode = "original";
-  state.resizeWidth = baseSize.width;
-  state.resizeHeight = baseSize.height;
-  state.resizeAspectLocked = true;
-  renderResizeUi();
-}
-
 function renderResizeUi(): void {
   const editable = isResizeEditable();
   const outputSize = editable ? getCurrentResizeSize() : { width: 0, height: 0 };
-  const baseSize = editable ? getBaseFrameSize() : { width: 0, height: 0 };
   const customActive = editable && state.resizeMode === "custom";
 
   for (const button of resizeModeButtons) {
@@ -1526,15 +1441,9 @@ function renderResizeUi(): void {
   resizeHeightInput.max = String(MAX_OUTPUT_DIMENSION);
   resizeAspectInput.checked = state.resizeAspectLocked;
   resizeAspectInput.disabled = !customActive;
-  resetSizeButton.disabled = !editable || state.resizeMode === "original";
   sizeSummary.textContent = editable
     ? `${getResizeModeLabel(state.resizeMode)} ${outputSize.width} x ${outputSize.height}`
     : "Original";
-  sizeMessage.textContent = !editable
-    ? "Load a video to resize the output frame."
-    : state.resizeMode === "original"
-      ? `Output follows the current frame: ${baseSize.width} x ${baseSize.height}.`
-      : `Output will scale from ${baseSize.width} x ${baseSize.height} to ${outputSize.width} x ${outputSize.height}.`;
 }
 
 function isResizeEditable(): boolean {
@@ -1890,11 +1799,9 @@ function resetSource(): void {
 
   fileInput.value = "";
   uploadTitle.textContent = "Drop a video file here";
-  uploadCopy.textContent = "Your video stays in this browser.";
   previewStatus.textContent = "Empty";
   previewStatus.classList.add("status-pill-muted");
   previewStatus.classList.remove("status-pill-warning");
-  inspectorStatus.textContent = "Idle";
   placeholder.classList.remove("is-hidden");
   metaFile.textContent = "No source loaded";
   metaResolution.textContent = "--";
@@ -1942,10 +1849,6 @@ function formatSecondsInput(value: number): string {
   return (Math.round(value * 10) / 10).toFixed(1);
 }
 
-function formatPreciseSeconds(value: number): string {
-  return `${formatSecondsInput(value)} sec`;
-}
-
 function formatPlayerTime(totalSeconds: number): string {
   if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
     return "0:00";
@@ -1961,6 +1864,24 @@ function formatPlayerTime(totalSeconds: number): string {
   }
 
   return `${minutes}:${padTime(seconds)}`;
+}
+
+function formatTrimTime(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
+    return "0:00.0";
+  }
+
+  const tenths = Math.floor((totalSeconds % 1) * 10);
+  const wholeSeconds = Math.floor(totalSeconds);
+  const hours = Math.floor(wholeSeconds / 3600);
+  const minutes = Math.floor((wholeSeconds % 3600) / 60);
+  const seconds = wholeSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${padTime(minutes)}:${padTime(seconds)}.${tenths}`;
+  }
+
+  return `${minutes}:${padTime(seconds)}.${tenths}`;
 }
 
 function formatMarkerTime(value: number): string {
