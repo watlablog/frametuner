@@ -18,6 +18,10 @@ type PreviewState = {
   cropMode: CropMode;
   cropRect: CropRect;
   freeCropSizeLocked: boolean;
+  resizeMode: ResizeMode;
+  resizeWidth: number;
+  resizeHeight: number;
+  resizeAspectLocked: boolean;
   thumbnailDataUrls: string[];
   thumbnailGenerationId: number;
   activeTrimEdge: TrimEdge | null;
@@ -26,6 +30,7 @@ type PreviewState = {
 type TrimEdge = "start" | "end";
 type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
 type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
+type ResizeMode = "original" | "1080p" | "720p" | "480p" | "custom";
 
 type CropRect = {
   x: number;
@@ -50,6 +55,8 @@ const TRIM_THUMBNAIL_WIDTH = 160;
 const TRIM_THUMBNAIL_HEIGHT = 90;
 const TRIM_FILMSTRIP_HIDE_DELAY_MS = 180;
 const MIN_CROP_SIZE_RATIO = 0.12;
+const MIN_OUTPUT_DIMENSION = 2;
+const MAX_OUTPUT_DIMENSION = 7680;
 const DEFAULT_CROP_RECT: CropRect = {
   x: 0,
   y: 0,
@@ -67,6 +74,18 @@ const CROP_MODES: Array<{
   { mode: "9:16", label: "9:16", ratio: 9 / 16 },
   { mode: "1:1", label: "1:1", ratio: 1 },
   { mode: "free", label: "Free", ratio: null }
+];
+
+const RESIZE_PRESETS: Array<{
+  mode: ResizeMode;
+  label: string;
+  shortEdge: number | null;
+}> = [
+  { mode: "original", label: "Original", shortEdge: null },
+  { mode: "1080p", label: "1080p", shortEdge: 1080 },
+  { mode: "720p", label: "720p", shortEdge: 720 },
+  { mode: "480p", label: "480p", shortEdge: 480 },
+  { mode: "custom", label: "Custom", shortEdge: null }
 ];
 
 const PLAYER_ICONS = {
@@ -98,11 +117,6 @@ type PlayerIconName = keyof typeof PLAYER_ICONS;
 
 const initialControlTiles: ControlTile[] = [
   {
-    title: "Size",
-    value: "Original",
-    note: "Scale"
-  },
-  {
     title: "FPS",
     value: "Original",
     note: "Frame rate"
@@ -126,6 +140,10 @@ const state: PreviewState = {
   cropMode: "full",
   cropRect: { ...DEFAULT_CROP_RECT },
   freeCropSizeLocked: false,
+  resizeMode: "original",
+  resizeWidth: 0,
+  resizeHeight: 0,
+  resizeAspectLocked: true,
   thumbnailDataUrls: [],
   thumbnailGenerationId: 0,
   activeTrimEdge: null
@@ -366,6 +384,71 @@ root.innerHTML = `
           <p class="crop-message" data-crop-message>Load a video to crop the preview frame.</p>
         </section>
 
+        <section class="size-panel" aria-labelledby="size-title">
+          <div class="size-heading">
+            <div>
+              <span class="section-kicker">Output</span>
+              <h3 id="size-title">Size</h3>
+            </div>
+            <span data-size-summary>Original</span>
+          </div>
+
+          <div class="size-preset-grid" role="group" aria-label="Output size preset">
+            ${RESIZE_PRESETS.map(
+              (preset) => `
+                <button
+                  class="size-preset-button"
+                  type="button"
+                  data-resize-mode="${preset.mode}"
+                  disabled
+                >
+                  ${preset.label}
+                </button>
+              `
+            ).join("")}
+          </div>
+
+          <div class="size-fields">
+            <label>
+              <span>Width</span>
+              <input
+                type="number"
+                min="2"
+                value="0"
+                step="2"
+                inputmode="numeric"
+                aria-label="Output width in pixels"
+                data-resize-width
+                disabled
+              />
+            </label>
+            <label>
+              <span>Height</span>
+              <input
+                type="number"
+                min="2"
+                value="0"
+                step="2"
+                inputmode="numeric"
+                aria-label="Output height in pixels"
+                data-resize-height
+                disabled
+              />
+            </label>
+          </div>
+
+          <label class="size-option">
+            <input type="checkbox" data-resize-aspect checked disabled />
+            <span>Keep aspect</span>
+          </label>
+
+          <div class="size-actions">
+            <button class="button" type="button" data-reset-size disabled>Reset size</button>
+          </div>
+
+          <p class="size-message" data-size-message>Load a video to resize the output frame.</p>
+        </section>
+
         <div class="control-grid">
           ${initialControlTiles
             .map(
@@ -472,6 +555,13 @@ const freeCropHeightInput = query<HTMLInputElement>("[data-free-crop-height]");
 const freeSizeState = query<HTMLElement>("[data-free-size-state]");
 const cropModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-crop-mode]"));
 const resetCropButton = query<HTMLButtonElement>("[data-reset-crop]");
+const sizeSummary = query<HTMLElement>("[data-size-summary]");
+const sizeMessage = query<HTMLElement>("[data-size-message]");
+const resizeWidthInput = query<HTMLInputElement>("[data-resize-width]");
+const resizeHeightInput = query<HTMLInputElement>("[data-resize-height]");
+const resizeAspectInput = query<HTMLInputElement>("[data-resize-aspect]");
+const resizeModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-resize-mode]"));
+const resetSizeButton = query<HTMLButtonElement>("[data-reset-size]");
 let trimFilmstripHideTimer: number | null = null;
 let cropDragSession: CropDragSession | null = null;
 
@@ -517,6 +607,10 @@ video.addEventListener("loadedmetadata", () => {
   state.cropMode = "full";
   state.cropRect = { ...DEFAULT_CROP_RECT };
   state.freeCropSizeLocked = false;
+  state.resizeMode = "original";
+  state.resizeWidth = state.width;
+  state.resizeHeight = state.height;
+  state.resizeAspectLocked = true;
   video.currentTime = 0;
   renderLoadedState();
   void generateTrimThumbnails();
@@ -539,7 +633,9 @@ video.addEventListener("error", () => {
   videoStage.classList.remove("is-loaded", "fit-width", "fit-height");
   setPreviewControlsEnabled(false);
   setCropControlsEnabled(false);
+  setResizeControlsEnabled(false);
   renderCropUi();
+  renderResizeUi();
   uploadCopy.textContent = "This file cannot be previewed directly by this browser.";
 });
 
@@ -596,6 +692,32 @@ resetCropButton.addEventListener("click", () => {
   resetCropToFullFrame();
 });
 
+for (const button of resizeModeButtons) {
+  button.addEventListener("click", () => {
+    const mode = button.dataset.resizeMode as ResizeMode | undefined;
+    if (mode) {
+      setResizeMode(mode);
+    }
+  });
+}
+
+resizeWidthInput.addEventListener("change", () => {
+  applyCustomResizeFromInput("width");
+});
+
+resizeHeightInput.addEventListener("change", () => {
+  applyCustomResizeFromInput("height");
+});
+
+resizeAspectInput.addEventListener("change", () => {
+  state.resizeAspectLocked = resizeAspectInput.checked;
+  renderResizeUi();
+});
+
+resetSizeButton.addEventListener("click", () => {
+  resetResizeToOriginal();
+});
+
 cropBox.addEventListener("pointerdown", startCropDrag);
 cropBox.addEventListener("keydown", handleCropKeyboard);
 
@@ -643,6 +765,10 @@ function loadSourceFile(file: File): void {
   state.cropMode = "full";
   state.cropRect = { ...DEFAULT_CROP_RECT };
   state.freeCropSizeLocked = false;
+  state.resizeMode = "original";
+  state.resizeWidth = 0;
+  state.resizeHeight = 0;
+  state.resizeAspectLocked = true;
   state.thumbnailGenerationId += 1;
 
   uploadTitle.textContent = file.name;
@@ -658,8 +784,10 @@ function loadSourceFile(file: File): void {
   setPreviewControlsEnabled(false);
   setTrimControlsEnabled(false);
   setCropControlsEnabled(false);
+  setResizeControlsEnabled(false);
   renderTrimUi();
   renderCropUi();
+  renderResizeUi();
 
   video.src = state.sourceUrl;
   video.load();
@@ -679,8 +807,10 @@ function renderLoadedState(): void {
   setPreviewControlsEnabled(true);
   setTrimControlsEnabled(true);
   setCropControlsEnabled(true);
+  setResizeControlsEnabled(true);
   renderTrimUi();
   renderCropUi();
+  renderResizeUi();
   updatePlaybackUi();
 }
 
@@ -974,6 +1104,7 @@ function renderCropUi(): void {
       : active
         ? "Drag the crop area or handles to frame the output."
       : "Full frame is selected. Choose an aspect ratio to crop.";
+  renderResizeUi();
 }
 
 function applyFreeCropSizeFromInputs(): void {
@@ -1301,6 +1432,190 @@ function getCropModeLabel(mode: CropMode): string {
   return CROP_MODES.find((cropMode) => cropMode.mode === mode)?.label ?? "Crop";
 }
 
+function setResizeControlsEnabled(enabled: boolean): void {
+  for (const button of resizeModeButtons) {
+    button.disabled = !enabled;
+  }
+
+  const customEnabled = enabled && state.resizeMode === "custom";
+  resizeWidthInput.disabled = !customEnabled;
+  resizeHeightInput.disabled = !customEnabled;
+  resizeAspectInput.disabled = !customEnabled;
+  resetSizeButton.disabled = !enabled || state.resizeMode === "original";
+}
+
+function setResizeMode(mode: ResizeMode): void {
+  if (!isResizeEditable()) {
+    return;
+  }
+
+  const previousSize = getCurrentResizeSize();
+  state.resizeMode = mode;
+
+  if (mode === "custom") {
+    state.resizeWidth = previousSize.width;
+    state.resizeHeight = previousSize.height;
+  } else {
+    const presetSize = getResizeSizeForMode(mode);
+    state.resizeWidth = presetSize.width;
+    state.resizeHeight = presetSize.height;
+  }
+
+  renderResizeUi();
+}
+
+function applyCustomResizeFromInput(changedDimension: "width" | "height"): void {
+  if (!isResizeEditable()) {
+    renderResizeUi();
+    return;
+  }
+
+  const currentSize = getCurrentResizeSize();
+  const baseSize = getBaseFrameSize();
+  const baseAspect = baseSize.width > 0 && baseSize.height > 0 ? baseSize.width / baseSize.height : 1;
+  let width = clampResizeDimension(resizeWidthInput.value, currentSize.width);
+  let height = clampResizeDimension(resizeHeightInput.value, currentSize.height);
+
+  state.resizeMode = "custom";
+  state.resizeAspectLocked = resizeAspectInput.checked;
+
+  if (state.resizeAspectLocked) {
+    if (changedDimension === "width") {
+      height = normalizeOutputDimension(width / baseAspect);
+    } else {
+      width = normalizeOutputDimension(height * baseAspect);
+    }
+  }
+
+  state.resizeWidth = clamp(width, MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
+  state.resizeHeight = clamp(height, MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
+  renderResizeUi();
+}
+
+function resetResizeToOriginal(): void {
+  if (!isResizeEditable()) {
+    return;
+  }
+
+  const baseSize = getBaseFrameSize();
+  state.resizeMode = "original";
+  state.resizeWidth = baseSize.width;
+  state.resizeHeight = baseSize.height;
+  state.resizeAspectLocked = true;
+  renderResizeUi();
+}
+
+function renderResizeUi(): void {
+  const editable = isResizeEditable();
+  const outputSize = editable ? getCurrentResizeSize() : { width: 0, height: 0 };
+  const baseSize = editable ? getBaseFrameSize() : { width: 0, height: 0 };
+  const customActive = editable && state.resizeMode === "custom";
+
+  for (const button of resizeModeButtons) {
+    const isSelected = button.dataset.resizeMode === state.resizeMode;
+    button.classList.toggle("is-selected", isSelected);
+    button.setAttribute("aria-pressed", String(isSelected));
+    button.disabled = !editable;
+  }
+
+  resizeWidthInput.value = String(outputSize.width);
+  resizeHeightInput.value = String(outputSize.height);
+  resizeWidthInput.disabled = !customActive;
+  resizeHeightInput.disabled = !customActive;
+  resizeWidthInput.max = String(MAX_OUTPUT_DIMENSION);
+  resizeHeightInput.max = String(MAX_OUTPUT_DIMENSION);
+  resizeAspectInput.checked = state.resizeAspectLocked;
+  resizeAspectInput.disabled = !customActive;
+  resetSizeButton.disabled = !editable || state.resizeMode === "original";
+  sizeSummary.textContent = editable
+    ? `${getResizeModeLabel(state.resizeMode)} ${outputSize.width} x ${outputSize.height}`
+    : "Original";
+  sizeMessage.textContent = !editable
+    ? "Load a video to resize the output frame."
+    : state.resizeMode === "original"
+      ? `Output follows the current frame: ${baseSize.width} x ${baseSize.height}.`
+      : `Output will scale from ${baseSize.width} x ${baseSize.height} to ${outputSize.width} x ${outputSize.height}.`;
+}
+
+function isResizeEditable(): boolean {
+  return state.canPreviewDirectly && state.width > 0 && state.height > 0;
+}
+
+function getCurrentResizeSize(): { width: number; height: number } {
+  if (state.resizeMode === "custom") {
+    const baseSize = getBaseFrameSize();
+    return {
+      width: clampOutputSizeValue(state.resizeWidth || baseSize.width),
+      height: clampOutputSizeValue(state.resizeHeight || baseSize.height)
+    };
+  }
+
+  return getResizeSizeForMode(state.resizeMode);
+}
+
+function getResizeSizeForMode(mode: ResizeMode): { width: number; height: number } {
+  const baseSize = getBaseFrameSize();
+
+  if (baseSize.width <= 0 || baseSize.height <= 0) {
+    return { width: 0, height: 0 };
+  }
+
+  if (mode === "original" || mode === "custom") {
+    return baseSize;
+  }
+
+  const preset = RESIZE_PRESETS.find((resizePreset) => resizePreset.mode === mode);
+  const shortEdge = preset?.shortEdge;
+
+  if (!shortEdge) {
+    return baseSize;
+  }
+
+  const aspect = baseSize.width / baseSize.height;
+
+  if (baseSize.width >= baseSize.height) {
+    return {
+      width: normalizeOutputDimension(shortEdge * aspect),
+      height: normalizeOutputDimension(shortEdge)
+    };
+  }
+
+  return {
+    width: normalizeOutputDimension(shortEdge),
+    height: normalizeOutputDimension(shortEdge / aspect)
+  };
+}
+
+function getBaseFrameSize(): { width: number; height: number } {
+  if (!isResizeEditable()) {
+    return { width: 0, height: 0 };
+  }
+
+  return getCropPixelSize();
+}
+
+function clampResizeDimension(value: string, fallback: number): number {
+  const parsedValue = Math.round(Number(value));
+  const safeValue = Number.isFinite(parsedValue) ? parsedValue : fallback;
+  return clampOutputSizeValue(safeValue);
+}
+
+function clampOutputSizeValue(value: number): number {
+  return clamp(normalizeOutputDimension(value), MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
+}
+
+function normalizeOutputDimension(value: number): number {
+  if (!Number.isFinite(value)) {
+    return MIN_OUTPUT_DIMENSION;
+  }
+
+  return Math.max(MIN_OUTPUT_DIMENSION, Math.round(value / 2) * 2);
+}
+
+function getResizeModeLabel(mode: ResizeMode): string {
+  return RESIZE_PRESETS.find((preset) => preset.mode === mode)?.label ?? "Size";
+}
+
 async function generateTrimThumbnails(): Promise<void> {
   if (!state.sourceUrl || !state.canPreviewDirectly || state.duration <= 0) {
     resetTrimFilmstrip();
@@ -1567,6 +1882,10 @@ function resetSource(): void {
   state.cropMode = "full";
   state.cropRect = { ...DEFAULT_CROP_RECT };
   state.freeCropSizeLocked = false;
+  state.resizeMode = "original";
+  state.resizeWidth = 0;
+  state.resizeHeight = 0;
+  state.resizeAspectLocked = true;
   state.thumbnailGenerationId += 1;
 
   fileInput.value = "";
@@ -1584,8 +1903,10 @@ function resetSource(): void {
   setPreviewControlsEnabled(false);
   setTrimControlsEnabled(false);
   setCropControlsEnabled(false);
+  setResizeControlsEnabled(false);
   renderTrimUi();
   renderCropUi();
+  renderResizeUi();
   updatePlaybackUi();
 }
 
