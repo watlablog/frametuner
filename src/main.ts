@@ -322,20 +322,15 @@ root.innerHTML = `
         <h1 class="brand-wordmark">FrameTuner</h1>
         <p class="app-copy">Browser-based video trimming and tuning tool.</p>
       </div>
-      <div class="header-meta" aria-label="Project status">
-        <span class="status-pill">Milestone 2</span>
-        <span class="status-pill status-pill-muted">Preview</span>
-      </div>
     </header>
 
     <main class="workspace" aria-label="FrameTuner workspace">
       <section class="panel media-panel" aria-labelledby="preview-title">
-        <div class="upload-bar" tabindex="0" aria-label="Video file drop area">
-          <div class="upload-copy">
-            <strong data-upload-title>Drop a video file here</strong>
-          </div>
-          <input class="file-input" id="source-file" type="file" accept="video/*,image/gif" />
-          <div class="upload-actions">
+        <div class="preview-header">
+          <h2 id="preview-title">Video preview</h2>
+          <div class="preview-actions">
+            <span class="status-pill status-pill-muted" data-preview-status>Empty</span>
+            <input class="file-input" id="source-file" type="file" accept="video/*,image/gif" />
             <button class="button primary compact-button" type="button" data-choose-file>
               ${FOLDER_OPEN_ICON}
               <span>Open</span>
@@ -344,14 +339,6 @@ root.innerHTML = `
               Clear
             </button>
           </div>
-        </div>
-
-        <div class="preview-header">
-          <div>
-            <span class="section-kicker">Preview</span>
-            <h2 id="preview-title">Video preview</h2>
-          </div>
-          <span class="status-pill status-pill-muted" data-preview-status>Empty</span>
         </div>
 
         <div class="video-frame" aria-label="Preview area">
@@ -676,10 +663,8 @@ root.innerHTML = `
   </div>
 `;
 
-const fileInput = query<HTMLInputElement>("[data-choose-file] + input, #source-file");
+const fileInput = query<HTMLInputElement>("#source-file");
 const chooseFileButton = query<HTMLButtonElement>("[data-choose-file]");
-const uploadBar = query<HTMLDivElement>(".upload-bar");
-const uploadTitle = query<HTMLElement>("[data-upload-title]");
 const videoFrame = query<HTMLDivElement>(".video-frame");
 const videoStage = query<HTMLDivElement>("[data-video-stage]");
 const video = query<HTMLVideoElement>("[data-preview-video]");
@@ -743,13 +728,6 @@ let exportWarningPreviousFocus: HTMLElement | null = null;
 
 chooseFileButton.addEventListener("click", () => fileInput.click());
 
-uploadBar.addEventListener("keydown", (event) => {
-  if ((event.key === "Enter" || event.key === " ") && event.target === uploadBar) {
-    event.preventDefault();
-    fileInput.click();
-  }
-});
-
 fileInput.addEventListener("change", () => {
   const [file] = Array.from(fileInput.files ?? []);
   if (file) {
@@ -757,16 +735,16 @@ fileInput.addEventListener("change", () => {
   }
 });
 
-uploadBar.addEventListener("dragenter", handleDragOver);
-uploadBar.addEventListener("dragover", handleDragOver);
-uploadBar.addEventListener("dragleave", (event) => {
-  if (!uploadBar.contains(event.relatedTarget as Node | null)) {
-    uploadBar.classList.remove("is-dragging");
+videoFrame.addEventListener("dragenter", handleDragOver);
+videoFrame.addEventListener("dragover", handleDragOver);
+videoFrame.addEventListener("dragleave", (event) => {
+  if (!videoFrame.contains(event.relatedTarget as Node | null)) {
+    videoFrame.classList.remove("is-dragging");
   }
 });
-uploadBar.addEventListener("drop", (event) => {
+videoFrame.addEventListener("drop", (event) => {
   event.preventDefault();
-  uploadBar.classList.remove("is-dragging");
+  videoFrame.classList.remove("is-dragging");
   const [file] = Array.from(event.dataTransfer?.files ?? []);
   if (file) {
     loadSourceFile(file);
@@ -943,7 +921,10 @@ function query<T extends Element>(selector: string): T {
 
 function handleDragOver(event: DragEvent): void {
   event.preventDefault();
-  uploadBar.classList.add("is-dragging");
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "copy";
+  }
+  videoFrame.classList.add("is-dragging");
 }
 
 function isGifFile(file: File): boolean {
@@ -981,7 +962,6 @@ function loadSourceFile(file: File): void {
   state.thumbnailGenerationId += 1;
   const generationId = state.thumbnailGenerationId;
 
-  uploadTitle.textContent = file.name;
   previewStatus.textContent = "Loading";
   previewStatus.classList.add("status-pill-muted");
   previewStatus.classList.remove("status-pill-warning");
@@ -3396,7 +3376,6 @@ function resetSource(): void {
   state.thumbnailGenerationId += 1;
 
   fileInput.value = "";
-  uploadTitle.textContent = "Drop a video file here";
   previewStatus.textContent = "Empty";
   previewStatus.classList.add("status-pill-muted");
   previewStatus.classList.remove("status-pill-warning");
@@ -3422,6 +3401,7 @@ function resetVideoElement(): void {
   video.load();
   video.classList.remove("is-loaded");
   gifCanvas.classList.remove("is-loaded");
+  videoFrame.classList.remove("is-dragging");
   videoStage.classList.remove("is-loaded", "is-gif", "fit-width", "fit-height");
   cropDragSession = null;
   cropBox.classList.remove("is-dragging");

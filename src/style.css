@@ -58,8 +58,7 @@ select {
 
 button:focus-visible,
 input:focus-visible,
-select:focus-visible,
-.upload-bar:focus-visible {
+select:focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
@@ -89,7 +88,7 @@ p {
 .app-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   min-height: 38px;
 }
@@ -120,14 +119,6 @@ p {
   white-space: nowrap;
 }
 
-.header-meta {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) clamp(320px, 30vw, 380px);
@@ -148,7 +139,7 @@ p {
 
 .media-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 10px;
   padding: 12px;
   overflow: hidden;
@@ -160,6 +151,10 @@ p {
   gap: 8px;
   padding: 10px;
   overflow: auto;
+}
+
+.control-panel > * {
+  min-width: 0;
 }
 
 .section-kicker {
@@ -197,44 +192,6 @@ p {
   background: rgba(255, 207, 122, 0.1);
 }
 
-.upload-bar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  min-height: 46px;
-  border: 1px dashed var(--border-strong);
-  border-radius: 12px;
-  padding: 7px 10px;
-  background: rgba(6, 20, 38, 0.68);
-}
-
-.upload-bar.is-dragging {
-  border-color: rgba(255, 207, 122, 0.74);
-  background: rgba(38, 105, 255, 0.18);
-}
-
-.upload-copy {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.upload-copy strong {
-  overflow: hidden;
-  color: #ffffff;
-  font-size: 0.95rem;
-  line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.upload-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .file-input {
   position: absolute;
   width: 1px;
@@ -244,7 +201,6 @@ p {
   white-space: nowrap;
 }
 
-.upload-copy span:last-child,
 .message {
   color: var(--muted);
   font-size: 0.78rem;
@@ -255,9 +211,15 @@ p {
 .panel-heading,
 .export-heading {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.preview-header {
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
 }
 
 .preview-header h2,
@@ -268,6 +230,19 @@ p {
   font-size: 0.98rem;
   line-height: 1.2;
   letter-spacing: 0;
+}
+
+.preview-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.preview-actions > * {
+  min-width: 0;
 }
 
 .compact-heading {
@@ -291,6 +266,15 @@ p {
     linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
     linear-gradient(0deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
     #020913;
+  background-size: 34px 34px;
+}
+
+.video-frame.is-dragging {
+  border-color: rgba(255, 207, 122, 0.74);
+  background:
+    linear-gradient(90deg, rgba(255, 207, 122, 0.1) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255, 207, 122, 0.1) 1px, transparent 1px),
+    rgba(38, 105, 255, 0.16);
   background-size: 34px 34px;
 }
 
@@ -678,6 +662,12 @@ p {
   fill: currentColor;
 }
 
+.button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .button:disabled,
 .button[disabled],
 select:disabled,
@@ -710,6 +700,7 @@ input:disabled {
   --trim-active: 0%;
   display: grid;
   gap: 8px;
+  margin-top: 2px;
   border: 1px solid rgba(141, 189, 255, 0.16);
   border-radius: 11px;
   padding: 9px;
@@ -1488,11 +1479,6 @@ input:disabled {
     white-space: normal;
   }
 
-  .header-meta {
-    gap: 6px;
-    justify-content: flex-start;
-  }
-
   .media-panel,
   .control-panel {
     padding: 10px;
@@ -1538,34 +1524,10 @@ input:disabled {
     display: none;
   }
 
-  .header-meta {
-    flex-wrap: nowrap;
-    gap: 5px;
-  }
-
   .media-panel,
   .control-panel {
     gap: 6px;
     padding: 8px;
-  }
-
-  .upload-bar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
-    min-height: 0;
-    padding: 8px;
-  }
-
-  .upload-copy .section-kicker {
-    display: none;
-  }
-
-  .upload-copy strong {
-    font-size: 0.84rem;
-  }
-
-  .upload-copy span:last-child {
-    display: none;
   }
 
   .compact-button {
@@ -1590,7 +1552,26 @@ input:disabled {
   }
 
   .preview-header {
-    align-items: center;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .preview-actions {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px;
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .preview-actions .compact-button {
+    min-width: 0;
+    padding-inline: 9px;
+  }
+
+  .preview-actions .clear-button {
+    grid-column: 1 / -1;
+    width: 100%;
   }
 
   .video-frame {
@@ -1827,14 +1808,6 @@ input:disabled {
 
   .workspace {
     overflow: auto;
-  }
-
-  .upload-bar {
-    grid-template-columns: 1fr;
-  }
-
-  .upload-actions {
-    width: 100%;
   }
 
   .compact-button {
