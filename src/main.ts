@@ -16,6 +16,7 @@ type PreviewState = {
   width: number;
   height: number;
   canPreviewDirectly: boolean;
+  staticFrameCanvas: HTMLCanvasElement | null;
   gifFrames: GifFrame[];
   gifCurrentFrameIndex: number;
   gifCurrentTime: number;
@@ -34,12 +35,12 @@ type PreviewState = {
   activeTrimEdge: TrimEdge | null;
 };
 
-type SourceKind = "empty" | "video" | "gif";
+type SourceKind = "empty" | "video" | "gif" | "image";
 type TrimEdge = "start" | "end";
 type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
 type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 type ResizeMode = "original" | "custom";
-type ExportFormat = "mp4" | "gif";
+type ExportFormat = "mp4" | "gif" | "png" | "jpeg" | "bmp";
 type ExportJobStatus = "idle" | "loading-ffmpeg" | "running" | "done" | "error";
 
 type GifFrame = {
@@ -109,8 +110,9 @@ type ExportJobState = {
 };
 
 type ExportCommandPlan = {
-  sourceKind: "video" | "gif";
+  sourceKind: "video" | "gif" | "image";
   format: ExportFormat;
+  execution: "ffmpeg" | "canvas";
   inputName: string | null;
   outputName: string;
   outputFileName: string;
@@ -157,8 +159,8 @@ type GifExportSizeEstimate = {
   height: number;
 };
 
-type GifExportFrame = {
-  frame: GifFrame;
+type CanvasExportFrame = {
+  canvas: HTMLCanvasElement;
   duration: number;
 };
 
@@ -326,6 +328,7 @@ const state: PreviewState = {
   width: 0,
   height: 0,
   canPreviewDirectly: false,
+  staticFrameCanvas: null,
   gifFrames: [],
   gifCurrentFrameIndex: 0,
   gifCurrentTime: 0,
@@ -348,7 +351,7 @@ const exportState: ExportJobState = {
   status: "idle",
   format: "mp4",
   progress: 0,
-  message: "Load a video to export.",
+  message: "Load a source to export.",
   logs: [],
   outputUrl: null,
   outputFileName: null
@@ -375,10 +378,15 @@ root.innerHTML = `
     <main class="workspace" aria-label="FrameTuner workspace">
       <section class="panel media-panel" aria-labelledby="preview-title">
         <div class="preview-header">
-          <h2 id="preview-title">Video preview</h2>
+          <h2 id="preview-title">Preview</h2>
           <div class="preview-actions">
             <span class="status-pill status-pill-muted" data-preview-status>Empty</span>
-            <input class="file-input" id="source-file" type="file" accept="video/*,image/gif" />
+            <input
+              class="file-input"
+              id="source-file"
+              type="file"
+              accept="video/*,image/gif,image/png,image/jpeg,image/bmp,.jpg,.jpeg,.png,.bmp"
+            />
             <button class="button primary compact-button" type="button" data-choose-file>
               ${FOLDER_OPEN_ICON}
               <span>Open</span>
@@ -419,7 +427,7 @@ root.innerHTML = `
           </div>
           <div class="video-placeholder" data-video-placeholder>
             <span class="preview-monogram" aria-hidden="true">FT</span>
-            <p>Drop a video or GIF onto this preview window to load it.</p>
+            <p>Drop a video, GIF, or image onto this preview window to load it.</p>
           </div>
         </div>
 
@@ -437,7 +445,7 @@ root.innerHTML = `
           </label>
         </div>
 
-        <dl class="media-meta" data-media-meta aria-label="Video metadata">
+        <dl class="media-meta" data-media-meta aria-label="Source metadata">
           <div>
             <dt>File</dt>
             <dd data-meta-file>No source loaded</dd>
@@ -815,6 +823,7 @@ const resizeWidthInput = query<HTMLInputElement>("[data-resize-width]");
 const resizeHeightInput = query<HTMLInputElement>("[data-resize-height]");
 const resizeAspectInput = query<HTMLInputElement>("[data-resize-aspect]");
 const resizeModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-resize-mode]"));
+const controlGrid = query<HTMLDivElement>(".control-grid");
 const exportStatus = query<HTMLElement>("[data-export-status]");
 const exportFormatSelect = query<HTMLSelectElement>("[data-export-format]");
 const exportAudioSelect = query<HTMLSelectElement>("[data-export-audio]");
@@ -908,7 +917,7 @@ video.addEventListener("error", () => {
 });
 
 playToggle.addEventListener("click", async () => {
-  if (!state.canPreviewDirectly) {
+  if (!state.canPreviewDirectly || isSingleFrameSource()) {
     return;
   }
 
@@ -933,7 +942,7 @@ playToggle.addEventListener("click", async () => {
 });
 
 muteToggle.addEventListener("click", () => {
-  if (state.sourceKind === "gif") {
+  if (state.sourceKind !== "video") {
     return;
   }
 
@@ -942,7 +951,7 @@ muteToggle.addEventListener("click", () => {
 });
 
 seekInput.addEventListener("input", () => {
-  if (!state.canPreviewDirectly || state.duration <= 0) {
+  if (!state.canPreviewDirectly || state.duration <= 0 || isSingleFrameSource()) {
     return;
   }
 
@@ -1072,6 +1081,28 @@ function isGifFile(file: File): boolean {
   return file.type === "image/gif" || file.name.toLowerCase().endsWith(".gif");
 }
 
+function getStaticImageFormat(file: File): ExportFormat | null {
+  const fileName = file.name.toLowerCase();
+
+  if (file.type === "image/png" || fileName.endsWith(".png")) {
+    return "png";
+  }
+
+  if (
+    file.type === "image/jpeg" ||
+    fileName.endsWith(".jpg") ||
+    fileName.endsWith(".jpeg")
+  ) {
+    return "jpeg";
+  }
+
+  if (file.type === "image/bmp" || fileName.endsWith(".bmp")) {
+    return "bmp";
+  }
+
+  return null;
+}
+
 function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
   if (options.clearAssignCheckpoint !== false) {
     assignCheckpoint = null;
@@ -1084,12 +1115,14 @@ function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
   resetVideoElement();
   resetTrimFilmstrip();
   resetGifState();
+  resetStaticImageState();
 
   const isGif = isGifFile(file);
+  const staticImageFormat = getStaticImageFormat(file);
 
   state.sourceFile = file;
-  state.sourceKind = isGif ? "gif" : "video";
-  exportState.format = isGif ? "gif" : "mp4";
+  state.sourceKind = isGif ? "gif" : staticImageFormat ? "image" : "video";
+  exportState.format = isGif ? "gif" : staticImageFormat ?? "mp4";
   state.sourceUrl = null;
   state.duration = 0;
   state.width = 0;
@@ -1125,6 +1158,7 @@ function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
   setTrimControlsEnabled(false);
   setCropControlsEnabled(false);
   setResizeControlsEnabled(false);
+  renderSourceModeUi();
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
@@ -1132,6 +1166,11 @@ function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
 
   if (isGif) {
     void loadGifSource(file, generationId);
+    return;
+  }
+
+  if (staticImageFormat) {
+    void loadStaticImageSource(file, generationId);
     return;
   }
 
@@ -1145,6 +1184,17 @@ async function loadGifSource(file: File, generationId: number): Promise<void> {
     const decodedGif = await decodeGifFrames(file, generationId);
 
     if (!decodedGif || !isCurrentSourceGeneration(file, generationId)) {
+      return;
+    }
+
+    if (decodedGif.frames.length === 1) {
+      state.sourceKind = "image";
+      initializeLoadedStaticFrame(
+        decodedGif.frames[0].canvas,
+        decodedGif.width,
+        decodedGif.height,
+        generationId
+      );
       return;
     }
 
@@ -1176,6 +1226,114 @@ async function loadGifSource(file: File, generationId: number): Promise<void> {
       handlePreviewLoadFailure();
     }
   }
+}
+
+async function loadStaticImageSource(file: File, generationId: number): Promise<void> {
+  try {
+    const frameCanvas = await decodeStaticImageToCanvas(file);
+
+    if (!isCurrentSourceGeneration(file, generationId)) {
+      return;
+    }
+
+    initializeLoadedStaticFrame(frameCanvas, frameCanvas.width, frameCanvas.height, generationId);
+  } catch {
+    if (isCurrentSourceGeneration(file, generationId)) {
+      handlePreviewLoadFailure();
+    }
+  }
+}
+
+function initializeLoadedStaticFrame(
+  frameCanvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+  generationId: number
+): void {
+  state.staticFrameCanvas = frameCanvas;
+  state.gifFrames = [];
+  state.gifCurrentFrameIndex = 0;
+  state.gifCurrentTime = 0;
+  state.gifIsPlaying = false;
+  state.duration = 0;
+  state.width = width;
+  state.height = height;
+  state.canPreviewDirectly = true;
+  state.trimStart = 0;
+  state.trimEnd = 0;
+  state.cropMode = "full";
+  state.cropRect = { ...DEFAULT_CROP_RECT };
+  state.freeCropSizeLocked = false;
+  state.resizeMode = "original";
+  state.resizeWidth = state.width;
+  state.resizeHeight = state.height;
+  state.resizeAspectLocked = true;
+  applyPendingSettingsRestore(generationId);
+
+  gifCanvas.width = state.width;
+  gifCanvas.height = state.height;
+  drawStaticFrame();
+  resetTrimFilmstrip();
+  renderLoadedState();
+}
+
+async function decodeStaticImageToCanvas(file: File): Promise<HTMLCanvasElement> {
+  if ("createImageBitmap" in window) {
+    try {
+      const bitmap = await createImageBitmap(file);
+
+      try {
+        return drawSourceToCanvas(bitmap, bitmap.width, bitmap.height);
+      } finally {
+        bitmap.close();
+      }
+    } catch {
+      // Fall back to HTMLImageElement; it covers some browser-specific bitmap decode gaps.
+    }
+  }
+
+  const image = await loadImageElement(file);
+  return drawSourceToCanvas(image, image.naturalWidth, image.naturalHeight);
+}
+
+function loadImageElement(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const imageUrl = URL.createObjectURL(file);
+
+    image.onload = () => {
+      URL.revokeObjectURL(imageUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(imageUrl);
+      reject(new Error("Image could not be decoded."));
+    };
+    image.src = imageUrl;
+  });
+}
+
+function drawSourceToCanvas(
+  source: CanvasImageSource,
+  width: number,
+  height: number
+): HTMLCanvasElement {
+  if (width <= 0 || height <= 0) {
+    throw new Error("Image dimensions could not be decoded.");
+  }
+
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Canvas is not available.");
+  }
+
+  canvas.width = width;
+  canvas.height = height;
+  context.drawImage(source, 0, 0, width, height);
+
+  return canvas;
 }
 
 function captureEditSettings(): EditSettingsSnapshot {
@@ -1242,11 +1400,12 @@ function handlePreviewLoadFailure(): void {
   placeholder.classList.remove("is-hidden");
   video.classList.remove("is-loaded");
   gifCanvas.classList.remove("is-loaded");
-  videoStage.classList.remove("is-loaded", "is-gif", "fit-width", "fit-height");
+  videoStage.classList.remove("is-loaded", "is-gif", "is-canvas-source", "fit-width", "fit-height");
   setPreviewControlsEnabled(false);
   setTrimControlsEnabled(false);
   setCropControlsEnabled(false);
   setResizeControlsEnabled(false);
+  renderSourceModeUi();
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
@@ -1255,20 +1414,25 @@ function handlePreviewLoadFailure(): void {
 }
 
 function renderLoadedState(): void {
+  const singleFrameSource = isSingleFrameSource();
+  const canvasSource = state.sourceKind === "gif" || singleFrameSource;
+
   previewStatus.textContent = "Ready";
   previewStatus.classList.remove("status-pill-muted", "status-pill-warning");
   placeholder.classList.add("is-hidden");
   video.classList.toggle("is-loaded", state.sourceKind === "video");
-  gifCanvas.classList.toggle("is-loaded", state.sourceKind === "gif");
+  gifCanvas.classList.toggle("is-loaded", canvasSource);
   videoStage.classList.toggle("is-gif", state.sourceKind === "gif");
+  videoStage.classList.toggle("is-canvas-source", canvasSource);
   metaResolution.textContent =
     state.width > 0 && state.height > 0 ? `${state.width} x ${state.height}` : "Unknown";
-  metaDuration.textContent = formatTime(state.duration);
+  metaDuration.textContent = singleFrameSource ? "Single frame" : formatTime(state.duration);
   updatePreviewFit();
   setPreviewControlsEnabled(true);
-  setTrimControlsEnabled(true);
+  setTrimControlsEnabled(!singleFrameSource);
   setCropControlsEnabled(true);
   setResizeControlsEnabled(true);
+  renderSourceModeUi();
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
@@ -1427,10 +1591,11 @@ function handleTimeUpdate(): void {
 function updatePlaybackUi(): void {
   const duration = state.sourceKind === "video" && Number.isFinite(video.duration) ? video.duration : state.duration;
   const currentTime = getCurrentPreviewTime();
-  const isPlaying = state.sourceKind === "gif" ? state.gifIsPlaying : !video.paused;
-  const muteLabel = state.sourceKind === "gif" ? "No audio" : video.muted ? "Unmute" : "Mute";
-  const muteIcon = state.sourceKind === "gif" ? "volume" : video.muted ? "muted" : "volume";
-  const mutePressed = state.sourceKind === "gif" ? false : video.muted;
+  const isPlaying =
+    state.sourceKind === "gif" ? state.gifIsPlaying : state.sourceKind === "video" ? !video.paused : false;
+  const muteLabel = state.sourceKind === "video" ? video.muted ? "Unmute" : "Mute" : "No audio";
+  const muteIcon = state.sourceKind === "video" && video.muted ? "muted" : "volume";
+  const mutePressed = state.sourceKind === "video" ? video.muted : false;
 
   setPlayerIconButton(playToggle, isPlaying ? "pause" : "play", isPlaying ? "Pause" : "Play", isPlaying);
   setPlayerIconButton(muteToggle, muteIcon, muteLabel, mutePressed);
@@ -1462,10 +1627,22 @@ function getCurrentPreviewTime(): number {
     return state.gifCurrentTime;
   }
 
-  return Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  return state.sourceKind === "video" && Number.isFinite(video.currentTime) ? video.currentTime : 0;
+}
+
+function isSingleFrameSource(): boolean {
+  return state.sourceKind === "image";
+}
+
+function renderSourceModeUi(): void {
+  controlGrid.classList.toggle("is-hidden", isSingleFrameSource());
 }
 
 function seekPreviewToTime(time: number): void {
+  if (isSingleFrameSource()) {
+    return;
+  }
+
   const targetTime = clamp(time, 0, state.duration);
 
   if (state.sourceKind === "gif") {
@@ -1560,6 +1737,15 @@ function drawGifFrame(frameIndex: number): void {
 
   gifContext.clearRect(0, 0, gifCanvas.width, gifCanvas.height);
   gifContext.drawImage(frame.canvas, 0, 0, gifCanvas.width, gifCanvas.height);
+}
+
+function drawStaticFrame(): void {
+  if (!gifContext || !state.staticFrameCanvas) {
+    return;
+  }
+
+  gifContext.clearRect(0, 0, gifCanvas.width, gifCanvas.height);
+  gifContext.drawImage(state.staticFrameCanvas, 0, 0, gifCanvas.width, gifCanvas.height);
 }
 
 function getGifFrameIndexAtTime(time: number, preferPreviousBoundary = false): number {
@@ -1731,6 +1917,23 @@ function bindTrimRangeEvents(input: HTMLInputElement, edge: TrimEdge): void {
 }
 
 function renderTrimUi(): void {
+  if (isSingleFrameSource()) {
+    trimSummary.textContent = "Single frame";
+    trimStartMarkerTime.textContent = "0.0s";
+    trimEndMarkerTime.textContent = "0.0s";
+    trimActiveLabel.textContent = "Start";
+    trimActiveTime.textContent = "0.0s";
+    trimStartRange.value = "0";
+    trimEndRange.value = String(TRIM_SLIDER_MAX);
+    trimSlider.style.setProperty("--trim-start", "0%");
+    trimSlider.style.setProperty("--trim-end", "100%");
+    trimFilmstrip.style.setProperty("--trim-start", "0%");
+    trimFilmstrip.style.setProperty("--trim-end", "100%");
+    trimFilmstrip.style.setProperty("--trim-active", "0%");
+    trimFilmstrip.classList.remove("has-thumbnails", "edge-start", "edge-end", "is-visible");
+    return;
+  }
+
   const duration = state.duration;
   const enabled = state.canPreviewDirectly && duration > 0;
   const trimDuration = Math.max(0, state.trimEnd - state.trimStart);
@@ -2316,7 +2519,7 @@ async function assignCurrentSource(): Promise<void> {
   }
 
   try {
-    const outputBlob = await runFfmpegTransform(commandPlan, sourceFile, "Assigning");
+    const outputBlob = await runSourceTransform(commandPlan, sourceFile, "Assigning");
     const assignedFile = createAssignedFile(sourceFile.name, outputBlob, commandPlan.format);
     const conversionLogs = [...exportState.logs];
     assignCheckpoint = {
@@ -2411,7 +2614,7 @@ async function exportCurrentSource(): Promise<void> {
   }
 
   try {
-    const outputBlob = await runFfmpegTransform(commandPlan, sourceFile, "Exporting");
+    const outputBlob = await runSourceTransform(commandPlan, sourceFile, "Exporting");
 
     exportState.status = "running";
     exportState.message = `Saving ${formatExportLabel(commandPlan.format)}...`;
@@ -2444,6 +2647,43 @@ async function exportCurrentSource(): Promise<void> {
     showExportResultDialog("error");
     renderExportUi();
   }
+}
+
+async function runSourceTransform(
+  commandPlan: ExportCommandPlan,
+  sourceFile: File,
+  runningMessage: string
+): Promise<Blob> {
+  if (commandPlan.execution === "canvas") {
+    return runCanvasImageTransform(commandPlan, runningMessage);
+  }
+
+  return runFfmpegTransform(commandPlan, sourceFile, runningMessage);
+}
+
+async function runCanvasImageTransform(
+  commandPlan: ExportCommandPlan,
+  runningMessage: string
+): Promise<Blob> {
+  resetExportOutput();
+  exportState.status = "running";
+  exportState.progress = 0.18;
+  exportState.message = "Preparing source...";
+  exportState.logs = [];
+  appendExportLog(exportState.message);
+  renderExportUi();
+
+  const canvas = createEditedStaticFrameCanvas();
+  exportState.progress = 0.72;
+  exportState.message = `${runningMessage} ${formatExportLabel(commandPlan.format)}...`;
+  appendExportLog(exportState.message);
+  renderExportUi();
+
+  const outputBlob = await encodeStaticCanvas(canvas, commandPlan.format);
+  exportState.progress = 0.98;
+  renderExportUi();
+
+  return outputBlob;
 }
 
 async function runFfmpegTransform(
@@ -2511,7 +2751,7 @@ async function prepareExportCommandInput(
     return;
   }
 
-  await prepareGifExportInput(ffmpeg, workFiles);
+  await prepareFrameSequenceExportInput(ffmpeg, workFiles);
 }
 
 async function prepareVideoExportInput(
@@ -2529,11 +2769,11 @@ async function prepareVideoExportInput(
   await ffmpeg.writeFile(commandPlan.inputName, await fetchFile(sourceFile));
 }
 
-async function prepareGifExportInput(ffmpeg: FFmpeg, workFiles: Set<string>): Promise<void> {
-  const exportFrames = getTrimmedGifExportFrames();
+async function prepareFrameSequenceExportInput(ffmpeg: FFmpeg, workFiles: Set<string>): Promise<void> {
+  const exportFrames = getFrameSequenceExportFrames();
 
   if (exportFrames.length === 0) {
-    throw new Error("No GIF frames are available in the selected trim range.");
+    throw new Error("No frames are available for conversion.");
   }
 
   const geometry = getGifExportGeometry();
@@ -2556,7 +2796,7 @@ async function prepareGifExportInput(ffmpeg: FFmpeg, workFiles: Set<string>): Pr
     const frameName = `${GIF_FRAME_FILE_PREFIX}-${String(index).padStart(5, "0")}.png`;
 
     workFiles.add(frameName);
-    drawExportFrameToCanvas(context, canvas, exportFrame.frame.canvas, geometry);
+    drawExportFrameToCanvas(context, canvas, exportFrame.canvas, geometry);
     await ffmpeg.writeFile(frameName, await canvasToPngBytes(canvas));
     frameNames.push(frameName);
 
@@ -2572,10 +2812,23 @@ async function prepareGifExportInput(ffmpeg: FFmpeg, workFiles: Set<string>): Pr
   );
 }
 
-function getTrimmedGifExportFrames(): GifExportFrame[] {
+function getFrameSequenceExportFrames(): CanvasExportFrame[] {
+  if (isSingleFrameSource()) {
+    return [
+      {
+        canvas: getStaticSourceCanvas(),
+        duration: 1
+      }
+    ];
+  }
+
+  return getTrimmedGifExportFrames();
+}
+
+function getTrimmedGifExportFrames(): CanvasExportFrame[] {
   const trimStart = clamp(state.trimStart, 0, state.duration);
   const trimEnd = clamp(state.trimEnd, trimStart, state.duration);
-  const exportFrames: GifExportFrame[] = [];
+  const exportFrames: CanvasExportFrame[] = [];
 
   for (const frame of state.gifFrames) {
     const frameStart = frame.startTime;
@@ -2586,7 +2839,7 @@ function getTrimmedGifExportFrames(): GifExportFrame[] {
 
     if (duration > 0.001) {
       exportFrames.push({
-        frame,
+        canvas: frame.canvas,
         duration: Math.max(0.02, duration)
       });
     }
@@ -2596,15 +2849,19 @@ function getTrimmedGifExportFrames(): GifExportFrame[] {
 }
 
 function getGifExportGeometry(): GifExportGeometry {
-  const crop = getExportCropRect() ?? {
+  const crop = getCanvasExportCropRect() ?? {
     x: 0,
     y: 0,
     width: state.width,
     height: state.height
   };
   const resizeSize = getCurrentResizeSize();
-  const outputWidth = clampOutputSizeValue(resizeSize.width || crop.width);
-  const outputHeight = clampOutputSizeValue(resizeSize.height || crop.height);
+  const outputWidth = isSingleFrameSource()
+    ? clampImageOutputSizeValue(resizeSize.width || crop.width)
+    : clampOutputSizeValue(resizeSize.width || crop.width);
+  const outputHeight = isSingleFrameSource()
+    ? clampImageOutputSizeValue(resizeSize.height || crop.height)
+    : clampOutputSizeValue(resizeSize.height || crop.height);
 
   if (crop.width <= 0 || crop.height <= 0 || outputWidth <= 0 || outputHeight <= 0) {
     throw new Error("GIF conversion dimensions are invalid.");
@@ -2615,6 +2872,32 @@ function getGifExportGeometry(): GifExportGeometry {
     outputWidth,
     outputHeight
   };
+}
+
+function getCanvasExportCropRect(): { x: number; y: number; width: number; height: number } | null {
+  if (!isSingleFrameSource()) {
+    return getExportCropRect();
+  }
+
+  if (state.cropMode === "full" || state.width <= 0 || state.height <= 0) {
+    return null;
+  }
+
+  let x = Math.round(state.cropRect.x * state.width);
+  let y = Math.round(state.cropRect.y * state.height);
+  let width = Math.round(state.cropRect.width * state.width);
+  let height = Math.round(state.cropRect.height * state.height);
+
+  x = clamp(x, 0, Math.max(0, state.width - 1));
+  y = clamp(y, 0, Math.max(0, state.height - 1));
+  width = clamp(width, 1, state.width - x);
+  height = clamp(height, 1, state.height - y);
+
+  if (width >= state.width && height >= state.height && x === 0 && y === 0) {
+    return null;
+  }
+
+  return { x, y, width, height };
 }
 
 function drawExportFrameToCanvas(
@@ -2637,6 +2920,125 @@ function drawExportFrameToCanvas(
   );
 }
 
+function createEditedStaticFrameCanvas(): HTMLCanvasElement {
+  const sourceCanvas = getStaticSourceCanvas();
+  const geometry = getGifExportGeometry();
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Canvas is not available for image export.");
+  }
+
+  canvas.width = geometry.outputWidth;
+  canvas.height = geometry.outputHeight;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  drawExportFrameToCanvas(context, canvas, sourceCanvas, geometry);
+
+  return canvas;
+}
+
+function getStaticSourceCanvas(): HTMLCanvasElement {
+  if (!state.staticFrameCanvas) {
+    throw new Error("No image frame is available for export.");
+  }
+
+  return state.staticFrameCanvas;
+}
+
+async function encodeStaticCanvas(canvas: HTMLCanvasElement, format: ExportFormat): Promise<Blob> {
+  if (format === "png") {
+    return canvasToBlob(canvas, "image/png");
+  }
+
+  if (format === "jpeg") {
+    return canvasToBlob(createOpaqueCanvas(canvas), "image/jpeg", 0.92);
+  }
+
+  if (format === "bmp") {
+    return canvasToBmpBlob(createOpaqueCanvas(canvas));
+  }
+
+  throw new Error(`${formatExportLabel(format)} image export is not available for this source.`);
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Could not encode image export."));
+        return;
+      }
+
+      resolve(blob);
+    }, type, quality);
+  });
+}
+
+function createOpaqueCanvas(sourceCanvas: HTMLCanvasElement): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Canvas is not available for opaque image export.");
+  }
+
+  canvas.width = sourceCanvas.width;
+  canvas.height = sourceCanvas.height;
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(sourceCanvas, 0, 0);
+
+  return canvas;
+}
+
+function canvasToBmpBlob(canvas: HTMLCanvasElement): Blob {
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Canvas is not available for BMP export.");
+  }
+
+  const { width, height } = canvas;
+  const imageData = context.getImageData(0, 0, width, height).data;
+  const rowStride = Math.ceil((width * 3) / 4) * 4;
+  const pixelDataSize = rowStride * height;
+  const fileSize = 54 + pixelDataSize;
+  const buffer = new ArrayBuffer(fileSize);
+  const view = new DataView(buffer);
+
+  view.setUint8(0, 0x42);
+  view.setUint8(1, 0x4d);
+  view.setUint32(2, fileSize, true);
+  view.setUint32(10, 54, true);
+  view.setUint32(14, 40, true);
+  view.setInt32(18, width, true);
+  view.setInt32(22, height, true);
+  view.setUint16(26, 1, true);
+  view.setUint16(28, 24, true);
+  view.setUint32(34, pixelDataSize, true);
+  view.setInt32(38, 2835, true);
+  view.setInt32(42, 2835, true);
+
+  for (let y = 0; y < height; y += 1) {
+    const sourceY = height - 1 - y;
+    const sourceRowOffset = sourceY * width * 4;
+    const targetRowOffset = 54 + y * rowStride;
+
+    for (let x = 0; x < width; x += 1) {
+      const sourceOffset = sourceRowOffset + x * 4;
+      const targetOffset = targetRowOffset + x * 3;
+
+      view.setUint8(targetOffset, imageData[sourceOffset + 2]);
+      view.setUint8(targetOffset + 1, imageData[sourceOffset + 1]);
+      view.setUint8(targetOffset + 2, imageData[sourceOffset]);
+    }
+  }
+
+  return new Blob([buffer], { type: "image/bmp" });
+}
+
 function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -2652,7 +3054,7 @@ function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
   });
 }
 
-function buildGifConcatFile(frameNames: string[], exportFrames: GifExportFrame[]): string {
+function buildGifConcatFile(frameNames: string[], exportFrames: CanvasExportFrame[]): string {
   const lines = ["ffconcat version 1.0"];
 
   for (let index = 0; index < frameNames.length; index += 1) {
@@ -2715,17 +3117,20 @@ function canExportSource(): boolean {
   if (
     state.sourceFile === null ||
     !state.canPreviewDirectly ||
-    state.duration <= 0 ||
     isExportBusy()
   ) {
     return false;
   }
 
   if (state.sourceKind === "video") {
-    return true;
+    return state.duration > 0;
   }
 
-  return state.sourceKind === "gif" && state.gifFrames.length > 0;
+  if (state.sourceKind === "gif") {
+    return state.duration > 0 && state.gifFrames.length > 0;
+  }
+
+  return state.sourceKind === "image" && state.staticFrameCanvas !== null;
 }
 
 function canAssignSource(): boolean {
@@ -2737,11 +3142,15 @@ function canResetAssignedSource(): boolean {
 }
 
 function hasPendingEditSettings(): boolean {
-  if (!state.canPreviewDirectly || state.duration <= 0) {
+  if (!state.canPreviewDirectly || state.width <= 0 || state.height <= 0) {
     return false;
   }
 
-  return isTrimActive() || state.cropMode !== "full" || state.resizeMode !== "original";
+  if (isSingleFrameSource()) {
+    return state.cropMode !== "full" || state.resizeMode !== "original";
+  }
+
+  return state.duration > 0 && (isTrimActive() || state.cropMode !== "full" || state.resizeMode !== "original");
 }
 
 async function confirmLargeGifConversion(commandPlan: ExportCommandPlan): Promise<boolean> {
@@ -2890,13 +3299,17 @@ function handleExportResultDialogKeydown(event: KeyboardEvent): void {
 function getGifExportSizeEstimate(commandPlan?: ExportCommandPlan): GifExportSizeEstimate | null {
   const format = commandPlan?.format ?? getCurrentExportFormat();
 
-  if (format !== "gif" || !state.canPreviewDirectly || state.duration <= 0) {
+  if (format !== "gif" || !state.canPreviewDirectly) {
     return null;
   }
 
   const outputSize = getCurrentResizeSize();
-  const width = clampOutputSizeValue(outputSize.width || state.width);
-  const height = clampOutputSizeValue(outputSize.height || state.height);
+  const width = isSingleFrameSource()
+    ? clampImageOutputSizeValue(outputSize.width || state.width)
+    : clampOutputSizeValue(outputSize.width || state.width);
+  const height = isSingleFrameSource()
+    ? clampImageOutputSizeValue(outputSize.height || state.height)
+    : clampOutputSizeValue(outputSize.height || state.height);
   const frameCount = getEstimatedGifFrameCount();
 
   if (width <= 0 || height <= 0 || frameCount <= 0) {
@@ -2921,6 +3334,10 @@ function getEstimatedGifFrameCount(): number {
     return Math.max(1, Math.ceil(trimDuration * GIF_ESTIMATE_VIDEO_FPS));
   }
 
+  if (state.sourceKind === "image") {
+    return 1;
+  }
+
   return 0;
 }
 
@@ -2941,32 +3358,67 @@ function isExportBusy(): boolean {
 }
 
 function readExportFormatSelectValue(): ExportFormat {
-  return exportFormatSelect.value === "gif" ? "gif" : "mp4";
+  const value = exportFormatSelect.value;
+  return isExportFormat(value) ? value : getCurrentExportFormat();
 }
 
 function getCurrentExportFormat(): ExportFormat {
-  if (state.sourceKind === "video" || state.sourceKind === "gif") {
+  const availableFormats = getAvailableExportFormats();
+
+  if (availableFormats.includes(exportState.format)) {
     return exportState.format;
   }
 
-  return "mp4";
+  return availableFormats[0];
+}
+
+function getAvailableExportFormats(): ExportFormat[] {
+  if (state.sourceKind === "video") {
+    return ["mp4", "gif"];
+  }
+
+  if (state.sourceKind === "gif") {
+    return ["gif", "mp4"];
+  }
+
+  if (state.sourceKind === "image") {
+    return ["png", "jpeg", "bmp", "gif"];
+  }
+
+  return ["mp4"];
+}
+
+function isExportFormat(value: string): value is ExportFormat {
+  return ["mp4", "gif", "png", "jpeg", "bmp"].includes(value);
 }
 
 function formatExportLabel(format: ExportFormat): string {
-  return format.toUpperCase();
+  return format === "jpeg" ? "JPEG" : format.toUpperCase();
 }
 
 function getExportMimeType(format: ExportFormat): string {
-  return format === "gif" ? "image/gif" : "video/mp4";
+  if (format === "mp4") {
+    return "video/mp4";
+  }
+
+  if (format === "jpeg") {
+    return "image/jpeg";
+  }
+
+  return `image/${format}`;
 }
 
 function getExportSaveDescription(format: ExportFormat): string {
-  return format === "gif" ? "GIF image" : "MP4 video";
+  if (format === "mp4") {
+    return "MP4 video";
+  }
+
+  return `${formatExportLabel(format)} image`;
 }
 
 function getExportSaveAccept(format: ExportFormat): Record<string, string[]> {
   return {
-    [getExportMimeType(format)]: [`.${format}`]
+    [getExportMimeType(format)]: getExportFileExtensions(format).map((extension) => `.${extension}`)
   };
 }
 
@@ -3034,12 +3486,20 @@ function buildExportCommand(sourceFile: File): ExportCommandPlan {
     return buildGifExportCommand(sourceFile, getCurrentExportFormat());
   }
 
+  if (state.sourceKind === "image") {
+    return buildImageExportCommand(sourceFile, getCurrentExportFormat());
+  }
+
   return buildVideoExportCommand(sourceFile, getCurrentExportFormat());
 }
 
 function buildAssignCommand(sourceFile: File): ExportCommandPlan {
   if (state.sourceKind === "gif") {
     return buildGifExportCommand(sourceFile, "gif");
+  }
+
+  if (state.sourceKind === "image") {
+    return buildImageExportCommand(sourceFile, "png");
   }
 
   return buildVideoExportCommand(sourceFile, "mp4");
@@ -3087,6 +3547,7 @@ function buildVideoMp4ExportCommand(sourceFile: File): ExportCommandPlan {
   return {
     sourceKind: "video",
     format: "mp4",
+    execution: "ffmpeg",
     inputName,
     outputName,
     outputFileName: getExportFileName(sourceFile.name, "mp4"),
@@ -3119,6 +3580,7 @@ function buildVideoGifExportCommand(sourceFile: File): ExportCommandPlan {
   return {
     sourceKind: "video",
     format: "gif",
+    execution: "ffmpeg",
     inputName,
     outputName,
     outputFileName: getExportFileName(sourceFile.name, "gif"),
@@ -3138,6 +3600,7 @@ function buildGifExportCommand(sourceFile: File, format: ExportFormat): ExportCo
   return {
     sourceKind: "gif",
     format,
+    execution: "ffmpeg",
     inputName: null,
     outputName,
     outputFileName: getExportFileName(sourceFile.name, format),
@@ -3145,6 +3608,24 @@ function buildGifExportCommand(sourceFile: File, format: ExportFormat): ExportCo
     saveDescription: getExportSaveDescription(format),
     saveAccept: getExportSaveAccept(format),
     args
+  };
+}
+
+function buildImageExportCommand(sourceFile: File, format: ExportFormat): ExportCommandPlan {
+  const outputFormat = getAvailableExportFormats().includes(format) ? format : "png";
+  const outputName = `output.${getExportFileExtension(outputFormat)}`;
+
+  return {
+    sourceKind: "image",
+    format: outputFormat,
+    execution: outputFormat === "gif" ? "ffmpeg" : "canvas",
+    inputName: null,
+    outputName,
+    outputFileName: getExportFileName(sourceFile.name, outputFormat),
+    outputMimeType: getExportMimeType(outputFormat),
+    saveDescription: getExportSaveDescription(outputFormat),
+    saveAccept: getExportSaveAccept(outputFormat),
+    args: outputFormat === "gif" ? buildGifImageExportArgs(outputName) : []
   };
 }
 
@@ -3225,16 +3706,19 @@ function getExportCropRect(): { x: number; y: number; width: number; height: num
 function renderExportUi(): void {
   const busy = isExportBusy();
   const dialogOpen = isExportWarningDialogOpen();
+  const availableFormats = getAvailableExportFormats();
   const currentFormat = getCurrentExportFormat();
   const canExport = canExportSource() && !dialogOpen;
   const canAssign = canAssignSource() && !dialogOpen;
   const canResetAssign = canResetAssignedSource() && !dialogOpen;
+  exportState.format = currentFormat;
+  renderExportFormatOptions(availableFormats, currentFormat);
   exportFormatSelect.value = currentFormat;
   exportFormatSelect.disabled =
     busy ||
     dialogOpen ||
     !state.canPreviewDirectly ||
-    (state.sourceKind !== "video" && state.sourceKind !== "gif");
+    availableFormats.length <= 1;
   exportAudioSelect.options[0].textContent =
     state.sourceKind === "video" && currentFormat === "mp4" ? "Keep audio" : "No audio";
   assignButton.disabled = !canAssign;
@@ -3272,6 +3756,27 @@ function renderExportUi(): void {
   renderExportLog();
 }
 
+function renderExportFormatOptions(availableFormats: ExportFormat[], currentFormat: ExportFormat): void {
+  const currentOptionSignature = Array.from(exportFormatSelect.options)
+    .map((option) => option.value)
+    .join(",");
+  const nextOptionSignature = availableFormats.join(",");
+
+  if (currentOptionSignature === nextOptionSignature) {
+    return;
+  }
+
+  exportFormatSelect.replaceChildren(
+    ...availableFormats.map((format) => {
+      const option = document.createElement("option");
+      option.value = format;
+      option.textContent = formatExportLabel(format);
+      option.selected = format === currentFormat;
+      return option;
+    })
+  );
+}
+
 function renderExportLog(): void {
   exportLog.textContent = exportState.logs.join("\n");
   exportLog.scrollTop = exportLog.scrollHeight;
@@ -3306,7 +3811,7 @@ function resetExportState(): void {
   exportState.status = "idle";
   exportState.format = "mp4";
   exportState.progress = 0;
-  exportState.message = "Load a video to export.";
+  exportState.message = "Load a source to export.";
   exportState.logs = [];
   renderExportUi();
 }
@@ -3318,7 +3823,7 @@ function invalidateExportOutput(): void {
 
   if (!exportState.outputUrl && exportState.status === "idle") {
     if (isIdleExportNoticeMessage(exportState.message)) {
-      exportState.message = "Load a video to export.";
+      exportState.message = "Load a source to export.";
     }
     renderExportUi();
     return;
@@ -3327,7 +3832,7 @@ function invalidateExportOutput(): void {
   resetExportOutput();
   exportState.status = "idle";
   exportState.progress = 0;
-  exportState.message = "Load a video to export.";
+  exportState.message = "Load a source to export.";
   exportState.logs = [];
   renderExportUi();
 }
@@ -3369,15 +3874,23 @@ function getFileExtension(fileName: string): string {
 
 function getExportFileName(fileName: string, format: ExportFormat): string {
   const baseName = fileName.replace(/\.[^/.]+$/, "") || "video";
-  return `${baseName}_frametuner.${format}`;
+  return `${baseName}_frametuner.${getExportFileExtension(format)}`;
 }
 
 function createAssignedFile(sourceFileName: string, blob: Blob, format: ExportFormat): File {
   const baseName = sourceFileName.replace(/\.[^/.]+$/, "") || "video";
-  return new File([blob], `${baseName}_assigned.${format}`, {
+  return new File([blob], `${baseName}_assigned.${getExportFileExtension(format)}`, {
     type: getExportMimeType(format),
     lastModified: Date.now()
   });
+}
+
+function getExportFileExtension(format: ExportFormat): string {
+  return format === "jpeg" ? "jpg" : format;
+}
+
+function getExportFileExtensions(format: ExportFormat): string[] {
+  return format === "jpeg" ? ["jpg", "jpeg"] : [getExportFileExtension(format)];
 }
 
 function formatFfmpegSeconds(value: number): string {
@@ -3465,6 +3978,11 @@ function clampResizeDimension(value: string, fallback: number): number {
 
 function clampOutputSizeValue(value: number): number {
   return clamp(normalizeOutputDimension(value), MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
+}
+
+function clampImageOutputSizeValue(value: number): number {
+  const safeValue = Number.isFinite(value) ? Math.round(value) : 1;
+  return clamp(safeValue, 1, MAX_OUTPUT_DIMENSION);
 }
 
 function normalizeOutputDimension(value: number): number {
@@ -3773,9 +4291,10 @@ function timeToSliderValue(value: number): number {
 }
 
 function setPreviewControlsEnabled(enabled: boolean): void {
-  playToggle.disabled = !enabled;
-  muteToggle.disabled = !enabled || state.sourceKind === "gif";
-  seekInput.disabled = !enabled;
+  const singleFrameSource = isSingleFrameSource();
+  playToggle.disabled = !enabled || singleFrameSource;
+  muteToggle.disabled = !enabled || state.sourceKind !== "video";
+  seekInput.disabled = !enabled || singleFrameSource;
   for (const button of resetSourceButtons) {
     button.disabled = !state.sourceFile;
   }
@@ -3791,6 +4310,7 @@ function resetSource(): void {
   resetVideoElement();
   resetTrimFilmstrip();
   resetGifState();
+  resetStaticImageState();
 
   state.sourceFile = null;
   state.sourceUrl = null;
@@ -3822,6 +4342,7 @@ function resetSource(): void {
   setTrimControlsEnabled(false);
   setCropControlsEnabled(false);
   setResizeControlsEnabled(false);
+  renderSourceModeUi();
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
@@ -3836,7 +4357,7 @@ function resetVideoElement(): void {
   video.classList.remove("is-loaded");
   gifCanvas.classList.remove("is-loaded");
   videoFrame.classList.remove("is-dragging");
-  videoStage.classList.remove("is-loaded", "is-gif", "fit-width", "fit-height");
+  videoStage.classList.remove("is-loaded", "is-gif", "is-canvas-source", "fit-width", "fit-height");
   cropDragSession = null;
   cropBox.classList.remove("is-dragging");
 
@@ -3859,6 +4380,10 @@ function resetGifState(): void {
   state.gifIsPlaying = false;
   gifCanvas.width = 0;
   gifCanvas.height = 0;
+}
+
+function resetStaticImageState(): void {
+  state.staticFrameCanvas = null;
 }
 
 function clamp(value: number, min: number, max: number): number {

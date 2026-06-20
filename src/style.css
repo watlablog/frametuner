@@ -320,11 +320,13 @@ p {
   display: none;
 }
 
-.video-stage.is-gif .preview-video {
+.video-stage.is-gif .preview-video,
+.video-stage.is-canvas-source .preview-video {
   display: none;
 }
 
-.video-stage.is-gif .gif-preview-canvas {
+.video-stage.is-gif .gif-preview-canvas,
+.video-stage.is-canvas-source .gif-preview-canvas {
   display: block;
 }
 
@@ -693,6 +695,10 @@ input:disabled {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.control-grid.is-hidden {
+  display: none;
 }
 
 .trim-panel {
