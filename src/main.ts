@@ -103,6 +103,7 @@ type ExportJobState = {
   format: ExportFormat;
   progress: number;
   message: string;
+  logs: string[];
   outputUrl: string | null;
   outputFileName: string | null;
 };
@@ -117,6 +118,13 @@ type ExportCommandPlan = {
   saveDescription: string;
   saveAccept: Record<string, string[]>;
   args: string[];
+};
+
+type GifExportSizeEstimate = {
+  estimatedBytes: number;
+  frameCount: number;
+  width: number;
+  height: number;
 };
 
 type GifExportFrame = {
@@ -185,6 +193,11 @@ const EXPORT_MP4_OUTPUT_NAME = "output.mp4";
 const EXPORT_GIF_OUTPUT_NAME = "output.gif";
 const GIF_CONCAT_INPUT_NAME = "gif-frames.ffconcat";
 const GIF_FRAME_FILE_PREFIX = "gif-frame";
+const GIF_ESTIMATE_BYTES_PER_PIXEL_FRAME = 1.05;
+const GIF_ESTIMATE_VIDEO_FPS = 30;
+const GIF_EXPORT_WARNING_BYTES = 64 * 1024 * 1024;
+const GIF_EXPORT_WARNING_MESSAGE =
+  "This GIF export may be large and could fail during conversion. Reduce the output size with Resize or shorten the Trim range before exporting.";
 const DEFAULT_CROP_RECT: CropRect = {
   x: 0,
   y: 0,
@@ -291,6 +304,7 @@ const exportState: ExportJobState = {
   format: "mp4",
   progress: 0,
   message: "Load a video to export.",
+  logs: [],
   outputUrl: null,
   outputFileName: null
 };
@@ -630,12 +644,35 @@ root.innerHTML = `
             <span class="progress-bar" data-export-progress style="width: 0%"></span>
           </div>
           <p class="message" data-export-message>Load a video to export.</p>
+          <pre class="export-log is-hidden" data-export-log aria-live="polite"></pre>
           <a class="button export-download is-hidden" href="#" download data-export-download>
             Download MP4
           </a>
         </section>
       </aside>
     </main>
+  </div>
+
+  <div class="export-warning-backdrop" data-export-warning-dialog aria-hidden="true" hidden>
+    <section
+      class="export-warning-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="export-warning-title"
+      aria-describedby="export-warning-description"
+    >
+      <span class="section-kicker">Export warning</span>
+      <h2 id="export-warning-title">Large GIF export</h2>
+      <p id="export-warning-description">${GIF_EXPORT_WARNING_MESSAGE}</p>
+      <div class="export-warning-summary" aria-label="Estimated export details">
+        <span>Estimated GIF</span>
+        <strong data-export-warning-size>--</strong>
+      </div>
+      <div class="export-warning-actions">
+        <button class="button" type="button" data-export-warning-cancel>Cancel</button>
+        <button class="button primary" type="button" data-export-warning-ok>OK</button>
+      </div>
+    </section>
   </div>
 `;
 
@@ -689,13 +726,20 @@ const exportAudioSelect = query<HTMLSelectElement>("[data-export-audio]");
 const exportButton = query<HTMLButtonElement>("[data-export-button]");
 const exportProgress = query<HTMLElement>("[data-export-progress]");
 const exportMessage = query<HTMLElement>("[data-export-message]");
+const exportLog = query<HTMLPreElement>("[data-export-log]");
 const exportDownload = query<HTMLAnchorElement>("[data-export-download]");
+const exportWarningDialog = query<HTMLDivElement>("[data-export-warning-dialog]");
+const exportWarningSize = query<HTMLElement>("[data-export-warning-size]");
+const exportWarningCancelButton = query<HTMLButtonElement>("[data-export-warning-cancel]");
+const exportWarningOkButton = query<HTMLButtonElement>("[data-export-warning-ok]");
 let trimFilmstripHideTimer: number | null = null;
 let cropDragSession: CropDragSession | null = null;
 let gifPlaybackTimer: number | null = null;
 let ffmpegInstance: FFmpeg | null = null;
 let ffmpegLoadPromise: Promise<FFmpeg> | null = null;
 let latestFfmpegLog = "";
+let exportWarningDialogResolve: ((confirmed: boolean) => void) | null = null;
+let exportWarningPreviousFocus: HTMLElement | null = null;
 
 chooseFileButton.addEventListener("click", () => fileInput.click());
 
@@ -859,6 +903,18 @@ exportFormatSelect.addEventListener("change", () => {
 exportButton.addEventListener("click", () => {
   void exportCurrentSource();
 });
+exportWarningCancelButton.addEventListener("click", () => {
+  closeExportWarningDialog(false);
+});
+exportWarningOkButton.addEventListener("click", () => {
+  closeExportWarningDialog(true);
+});
+exportWarningDialog.addEventListener("click", (event) => {
+  if (event.target === exportWarningDialog) {
+    closeExportWarningDialog(false);
+  }
+});
+exportWarningDialog.addEventListener("keydown", handleExportWarningDialogKeydown);
 
 for (const button of resetSourceButtons) {
   button.addEventListener("click", resetSource);
@@ -2059,12 +2115,23 @@ async function exportCurrentSource(): Promise<void> {
   }
 
   const commandPlan = buildExportCommand(sourceFile);
+
+  if (!(await confirmLargeGifExport(commandPlan))) {
+    exportState.status = "idle";
+    exportState.progress = 0;
+    exportState.message = "Export canceled.";
+    exportState.logs = [];
+    renderExportUi();
+    return;
+  }
+
   const saveTarget = await requestExportSaveTarget(commandPlan);
 
   if (!saveTarget) {
     exportState.status = "idle";
     exportState.progress = 0;
     exportState.message = "Export canceled.";
+    exportState.logs = [];
     renderExportUi();
     return;
   }
@@ -2073,6 +2140,7 @@ async function exportCurrentSource(): Promise<void> {
   exportState.status = "loading-ffmpeg";
   exportState.progress = 0;
   exportState.message = "Loading FFmpeg...";
+  exportState.logs = [];
   latestFfmpegLog = "";
   renderExportUi();
 
@@ -2358,10 +2426,131 @@ function canExportSource(): boolean {
   }
 
   if (state.sourceKind === "video") {
-    return getCurrentExportFormat() === "mp4";
+    return true;
   }
 
   return state.sourceKind === "gif" && state.gifFrames.length > 0;
+}
+
+async function confirmLargeGifExport(commandPlan: ExportCommandPlan): Promise<boolean> {
+  const estimate = getGifExportSizeEstimate(commandPlan);
+
+  if (!estimate || estimate.estimatedBytes < GIF_EXPORT_WARNING_BYTES) {
+    return true;
+  }
+
+  return showExportWarningDialog(estimate);
+}
+
+function showExportWarningDialog(estimate: GifExportSizeEstimate): Promise<boolean> {
+  if (exportWarningDialogResolve) {
+    return Promise.resolve(false);
+  }
+
+  exportWarningSize.textContent = `~${formatEstimatedFileSize(estimate.estimatedBytes)}`;
+  exportWarningPreviousFocus =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  exportWarningDialog.hidden = false;
+  exportWarningDialog.setAttribute("aria-hidden", "false");
+
+  return new Promise((resolve) => {
+    exportWarningDialogResolve = (confirmed) => {
+      exportWarningDialog.hidden = true;
+      exportWarningDialog.setAttribute("aria-hidden", "true");
+      exportWarningDialogResolve = null;
+      resolve(confirmed);
+      renderExportUi();
+
+      if (exportWarningPreviousFocus && document.contains(exportWarningPreviousFocus)) {
+        exportWarningPreviousFocus.focus();
+      }
+
+      exportWarningPreviousFocus = null;
+    };
+
+    renderExportUi();
+    exportWarningCancelButton.focus();
+  });
+}
+
+function closeExportWarningDialog(confirmed: boolean): void {
+  exportWarningDialogResolve?.(confirmed);
+}
+
+function handleExportWarningDialogKeydown(event: KeyboardEvent): void {
+  if (!exportWarningDialogResolve) {
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeExportWarningDialog(false);
+    return;
+  }
+
+  if (event.key !== "Tab") {
+    return;
+  }
+
+  const focusableButtons = [exportWarningCancelButton, exportWarningOkButton];
+  const currentIndex = focusableButtons.indexOf(document.activeElement as HTMLButtonElement);
+  const direction = event.shiftKey ? -1 : 1;
+  const nextIndex =
+    currentIndex === -1
+      ? 0
+      : (currentIndex + direction + focusableButtons.length) % focusableButtons.length;
+
+  event.preventDefault();
+  focusableButtons[nextIndex].focus();
+}
+
+function getGifExportSizeEstimate(commandPlan?: ExportCommandPlan): GifExportSizeEstimate | null {
+  const format = commandPlan?.format ?? getCurrentExportFormat();
+
+  if (format !== "gif" || !state.canPreviewDirectly || state.duration <= 0) {
+    return null;
+  }
+
+  const outputSize = getCurrentResizeSize();
+  const width = clampOutputSizeValue(outputSize.width || state.width);
+  const height = clampOutputSizeValue(outputSize.height || state.height);
+  const frameCount = getEstimatedGifFrameCount();
+
+  if (width <= 0 || height <= 0 || frameCount <= 0) {
+    return null;
+  }
+
+  return {
+    estimatedBytes: width * height * frameCount * GIF_ESTIMATE_BYTES_PER_PIXEL_FRAME,
+    frameCount,
+    width,
+    height
+  };
+}
+
+function getEstimatedGifFrameCount(): number {
+  if (state.sourceKind === "gif") {
+    return getTrimmedGifExportFrames().length;
+  }
+
+  if (state.sourceKind === "video") {
+    const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+    return Math.max(1, Math.ceil(trimDuration * GIF_ESTIMATE_VIDEO_FPS));
+  }
+
+  return 0;
+}
+
+function formatEstimatedFileSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
+  }
+
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`;
+  }
+
+  return `${Math.max(0, Math.round(bytes))} B`;
 }
 
 function isExportBusy(): boolean {
@@ -2373,7 +2562,7 @@ function readExportFormatSelectValue(): ExportFormat {
 }
 
 function getCurrentExportFormat(): ExportFormat {
-  if (state.sourceKind === "gif") {
+  if (state.sourceKind === "video" || state.sourceKind === "gif") {
     return exportState.format;
   }
 
@@ -2434,7 +2623,18 @@ async function getLoadedFfmpeg(): Promise<FFmpeg> {
 }
 
 function handleFfmpegLog(event: LogEvent): void {
-  latestFfmpegLog = event.message;
+  const message = event.message.trim();
+
+  if (!message) {
+    return;
+  }
+
+  latestFfmpegLog = message;
+  exportState.logs = [...exportState.logs, message].slice(-18);
+
+  if (isExportBusy()) {
+    renderExportUi();
+  }
 }
 
 function handleFfmpegProgress(event: ProgressEvent): void {
@@ -2451,10 +2651,18 @@ function buildExportCommand(sourceFile: File): ExportCommandPlan {
     return buildGifExportCommand(sourceFile, getCurrentExportFormat());
   }
 
-  return buildVideoExportCommand(sourceFile);
+  return buildVideoExportCommand(sourceFile, getCurrentExportFormat());
 }
 
-function buildVideoExportCommand(sourceFile: File): ExportCommandPlan {
+function buildVideoExportCommand(sourceFile: File, format: ExportFormat): ExportCommandPlan {
+  if (format === "gif") {
+    return buildVideoGifExportCommand(sourceFile);
+  }
+
+  return buildVideoMp4ExportCommand(sourceFile);
+}
+
+function buildVideoMp4ExportCommand(sourceFile: File): ExportCommandPlan {
   const inputName = `input.${getFileExtension(sourceFile.name)}`;
   const outputName = EXPORT_MP4_OUTPUT_NAME;
   const filters = buildVideoFilters();
@@ -2465,7 +2673,9 @@ function buildVideoExportCommand(sourceFile: File): ExportCommandPlan {
     "-ss", formatFfmpegSeconds(state.trimStart),
     "-t", formatFfmpegSeconds(trimDuration),
     "-map", "0:v:0",
-    "-map", "0:a?"
+    "-map", "0:a:0?",
+    "-dn",
+    "-sn"
   ];
 
   if (filters.length > 0) {
@@ -2492,6 +2702,38 @@ function buildVideoExportCommand(sourceFile: File): ExportCommandPlan {
     outputMimeType: getExportMimeType("mp4"),
     saveDescription: getExportSaveDescription("mp4"),
     saveAccept: getExportSaveAccept("mp4"),
+    args
+  };
+}
+
+function buildVideoGifExportCommand(sourceFile: File): ExportCommandPlan {
+  const inputName = `input.${getFileExtension(sourceFile.name)}`;
+  const outputName = EXPORT_GIF_OUTPUT_NAME;
+  const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+  const frameFilters = [
+    `trim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
+    "setpts=PTS-STARTPTS",
+    ...buildVideoFilters()
+  ];
+  const filterGraph = `[0:v]${frameFilters.join(",")},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a[v]`;
+  const args = [
+    "-y",
+    "-i", inputName,
+    "-filter_complex", filterGraph,
+    "-map", "[v]",
+    "-loop", "0",
+    outputName
+  ];
+
+  return {
+    sourceKind: "video",
+    format: "gif",
+    inputName,
+    outputName,
+    outputFileName: getExportFileName(sourceFile.name, "gif"),
+    outputMimeType: getExportMimeType("gif"),
+    saveDescription: getExportSaveDescription("gif"),
+    saveAccept: getExportSaveAccept("gif"),
     args
   };
 }
@@ -2591,11 +2833,17 @@ function getExportCropRect(): { x: number; y: number; width: number; height: num
 
 function renderExportUi(): void {
   const busy = isExportBusy();
+  const dialogOpen = isExportWarningDialogOpen();
   const currentFormat = getCurrentExportFormat();
-  const canExport = canExportSource();
+  const canExport = canExportSource() && !dialogOpen;
   exportFormatSelect.value = currentFormat;
-  exportFormatSelect.disabled = busy || state.sourceKind !== "gif" || !state.canPreviewDirectly;
-  exportAudioSelect.options[0].textContent = state.sourceKind === "gif" ? "No audio" : "Keep audio";
+  exportFormatSelect.disabled =
+    busy ||
+    dialogOpen ||
+    !state.canPreviewDirectly ||
+    (state.sourceKind !== "video" && state.sourceKind !== "gif");
+  exportAudioSelect.options[0].textContent =
+    state.sourceKind === "video" && currentFormat === "mp4" ? "Keep audio" : "No audio";
   exportButton.disabled = !canExport;
   exportButton.textContent = busy ? "Exporting..." : `Export ${formatExportLabel(currentFormat)}`;
   exportProgress.style.width = `${Math.round(clamp(exportState.progress, 0, 1) * 100)}%`;
@@ -2617,6 +2865,7 @@ function renderExportUi(): void {
   }
 
   exportMessage.textContent = getExportMessage();
+  renderExportLog();
   exportDownload.classList.toggle("is-hidden", !exportState.outputUrl);
 
   if (exportState.outputUrl && exportState.outputFileName) {
@@ -2630,6 +2879,14 @@ function renderExportUi(): void {
   }
 }
 
+function renderExportLog(): void {
+  const shouldShowLog =
+    exportState.logs.length > 0 && (isExportBusy() || exportState.status === "error");
+
+  exportLog.classList.toggle("is-hidden", !shouldShowLog);
+  exportLog.textContent = shouldShowLog ? exportState.logs.join("\n") : "";
+}
+
 function getExportMessage(): string {
   if (exportState.status === "done" || exportState.status === "error" || isExportBusy()) {
     return exportState.message;
@@ -2639,15 +2896,15 @@ function getExportMessage(): string {
     return exportState.message;
   }
 
-  if (state.sourceKind === "gif" && state.canPreviewDirectly) {
+  if ((state.sourceKind === "video" || state.sourceKind === "gif") && state.canPreviewDirectly) {
     return `Ready to export ${formatExportLabel(getCurrentExportFormat())}.`;
   }
 
-  if (state.sourceKind === "video" && state.canPreviewDirectly) {
-    return "Ready to export MP4.";
-  }
-
   return "Load a video to export.";
+}
+
+function isExportWarningDialogOpen(): boolean {
+  return exportWarningDialogResolve !== null;
 }
 
 function resetExportState(): void {
@@ -2656,6 +2913,7 @@ function resetExportState(): void {
   exportState.format = "mp4";
   exportState.progress = 0;
   exportState.message = "Load a video to export.";
+  exportState.logs = [];
   renderExportUi();
 }
 
@@ -2673,6 +2931,7 @@ function invalidateExportOutput(): void {
   exportState.status = "idle";
   exportState.progress = 0;
   exportState.message = "Load a video to export.";
+  exportState.logs = [];
   renderExportUi();
 }
 

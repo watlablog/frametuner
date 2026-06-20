@@ -1340,6 +1340,26 @@ input:disabled {
   line-height: 1.35;
 }
 
+.export-log {
+  max-height: 96px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid rgba(255, 185, 115, 0.2);
+  border-radius: 7px;
+  padding: 7px;
+  color: rgba(255, 214, 174, 0.92);
+  background: rgba(13, 8, 6, 0.5);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.66rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.export-log.is-hidden {
+  display: none;
+}
+
 .export-download {
   display: inline-flex;
   justify-content: center;
@@ -1349,6 +1369,71 @@ input:disabled {
 
 .export-download.is-hidden {
   display: none;
+}
+
+.export-warning-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(2, 8, 18, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+.export-warning-backdrop[hidden] {
+  display: none;
+}
+
+.export-warning-dialog {
+  display: grid;
+  gap: 12px;
+  width: min(420px, 100%);
+  border: 1px solid rgba(255, 207, 122, 0.38);
+  border-radius: 14px;
+  padding: 18px;
+  color: var(--text);
+  background: rgba(8, 19, 35, 0.96);
+  box-shadow: 0 24px 70px rgba(0, 4, 14, 0.48);
+}
+
+.export-warning-dialog h2 {
+  color: #ffffff;
+  font-size: 1.15rem;
+  line-height: 1.15;
+}
+
+.export-warning-dialog p {
+  color: var(--success);
+  font-size: 0.88rem;
+  line-height: 1.48;
+}
+
+.export-warning-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid rgba(255, 207, 122, 0.22);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--muted);
+  background: rgba(255, 207, 122, 0.08);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.export-warning-summary strong {
+  color: var(--warm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.export-warning-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .progress-bar {
@@ -1727,6 +1812,11 @@ input:disabled {
 
   .export-strip .message {
     display: none;
+  }
+
+  .export-log {
+    max-height: 76px;
+    font-size: 0.62rem;
   }
 }
 
