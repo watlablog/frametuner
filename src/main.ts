@@ -120,6 +120,36 @@ type ExportCommandPlan = {
   args: string[];
 };
 
+type EditSettingsSnapshot = {
+  trimStart: number;
+  trimEnd: number;
+  cropMode: CropMode;
+  cropRect: CropRect;
+  freeCropSizeLocked: boolean;
+  resizeMode: ResizeMode;
+  resizeWidth: number;
+  resizeHeight: number;
+  resizeAspectLocked: boolean;
+};
+
+type AssignCheckpoint = {
+  sourceFile: File;
+  settings: EditSettingsSnapshot;
+  format: ExportFormat;
+};
+
+type PendingSettingsRestore = {
+  generationId: number;
+  settings: EditSettingsSnapshot;
+  format: ExportFormat;
+};
+
+type LoadSourceOptions = {
+  clearAssignCheckpoint?: boolean;
+  restoreSettings?: EditSettingsSnapshot;
+  restoreFormat?: ExportFormat;
+};
+
 type GifExportSizeEstimate = {
   estimatedBytes: number;
   frameCount: number;
@@ -196,8 +226,9 @@ const GIF_FRAME_FILE_PREFIX = "gif-frame";
 const GIF_ESTIMATE_BYTES_PER_PIXEL_FRAME = 1.05;
 const GIF_ESTIMATE_VIDEO_FPS = 30;
 const GIF_EXPORT_WARNING_BYTES = 64 * 1024 * 1024;
+const EXPORT_LOG_MAX_LINES = 240;
 const GIF_EXPORT_WARNING_MESSAGE =
-  "This GIF export may be large and could fail during conversion. Reduce the output size with Resize or shorten the Trim range before exporting.";
+  "This GIF conversion may be large and could fail. Reduce the output size with Resize or shorten the Trim range before converting.";
 const DEFAULT_CROP_RECT: CropRect = {
   x: 0,
   y: 0,
@@ -260,6 +291,13 @@ const FOLDER_OPEN_ICON = `
   </svg>
 `;
 
+const EXPORT_ICON = `
+  <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M12 3.5a1 1 0 0 1 1 1v8.1l2.7-2.7a1 1 0 1 1 1.4 1.4l-4.4 4.4a1 1 0 0 1-1.4 0l-4.4-4.4a1 1 0 1 1 1.4-1.4l2.7 2.7V4.5a1 1 0 0 1 1-1Z" />
+    <path d="M5 15.5a1 1 0 0 1 1 1v2h12v-2a1 1 0 1 1 2 0v3a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z" />
+  </svg>
+`;
+
 const initialControlTiles: ControlTile[] = [
   {
     title: "FPS",
@@ -308,6 +346,9 @@ const exportState: ExportJobState = {
   outputUrl: null,
   outputFileName: null
 };
+
+let assignCheckpoint: AssignCheckpoint | null = null;
+let pendingSettingsRestore: PendingSettingsRestore | null = null;
 
 const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -409,233 +450,279 @@ root.innerHTML = `
       </section>
 
       <aside class="panel control-panel" aria-label="Edit controls">
-        <section class="trim-panel" aria-labelledby="trim-title">
-          <div class="trim-heading">
-            <h3 id="trim-title">Trim range</h3>
-            <span data-trim-summary>0:00.0 - 0:00.0 / 0.0s</span>
-          </div>
+        <div class="export-tabs" role="tablist" aria-label="Editor panel tabs">
+          <button
+            class="export-tab is-selected"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="export-settings-panel"
+            id="export-settings-tab"
+            data-export-tab="settings"
+          >
+            Setting
+          </button>
+          <button
+            class="export-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="export-log-panel"
+            id="export-log-tab"
+            data-export-tab="log"
+          >
+            Log
+          </button>
+        </div>
 
-          <div class="trim-slider" data-trim-slider>
-            <div class="trim-filmstrip" data-trim-filmstrip aria-hidden="true">
-              <div class="trim-filmstrip-track" data-trim-filmstrip-track></div>
-              <span class="trim-filmstrip-shade trim-filmstrip-shade-start"></span>
-              <span class="trim-filmstrip-shade trim-filmstrip-shade-end"></span>
-              <span class="trim-filmstrip-marker trim-filmstrip-marker-start">
-                <span>Start</span>
-                <strong data-trim-start-marker-time>00:00</strong>
-              </span>
-              <span class="trim-filmstrip-marker trim-filmstrip-marker-end">
-                <span>End</span>
-                <strong data-trim-end-marker-time>00:00</strong>
-              </span>
-              <span class="trim-filmstrip-active" data-trim-active-marker>
-                <span data-trim-active-label>Start</span>
-                <strong data-trim-active-time>00:00</strong>
-              </span>
+        <div
+          class="export-tab-panel setting-tab-panel"
+          id="export-settings-panel"
+          role="tabpanel"
+          aria-labelledby="export-settings-tab"
+          data-export-panel="settings"
+        >
+          <section class="trim-panel" aria-labelledby="trim-title">
+            <div class="trim-heading">
+              <h3 id="trim-title">Trim range</h3>
+              <span data-trim-summary>0:00.0 - 0:00.0 / 0.0s</span>
             </div>
 
-            <input
-              aria-label="Trim start"
-              type="range"
-              min="0"
-              max="${TRIM_SLIDER_MAX}"
-              value="0"
-              step="1"
-              data-trim-start-range
-              disabled
-            />
-            <input
-              aria-label="Trim end"
-              type="range"
-              min="0"
-              max="${TRIM_SLIDER_MAX}"
-              value="${TRIM_SLIDER_MAX}"
-              step="1"
-              data-trim-end-range
-              disabled
-            />
-          </div>
-        </section>
+            <div class="trim-slider" data-trim-slider>
+              <div class="trim-filmstrip" data-trim-filmstrip aria-hidden="true">
+                <div class="trim-filmstrip-track" data-trim-filmstrip-track></div>
+                <span class="trim-filmstrip-shade trim-filmstrip-shade-start"></span>
+                <span class="trim-filmstrip-shade trim-filmstrip-shade-end"></span>
+                <span class="trim-filmstrip-marker trim-filmstrip-marker-start">
+                  <span>Start</span>
+                  <strong data-trim-start-marker-time>00:00</strong>
+                </span>
+                <span class="trim-filmstrip-marker trim-filmstrip-marker-end">
+                  <span>End</span>
+                  <strong data-trim-end-marker-time>00:00</strong>
+                </span>
+                <span class="trim-filmstrip-active" data-trim-active-marker>
+                  <span data-trim-active-label>Start</span>
+                  <strong data-trim-active-time>00:00</strong>
+                </span>
+              </div>
 
-        <section class="crop-panel" aria-labelledby="crop-title">
-          <div class="crop-heading">
-            <h3 id="crop-title">Crop</h3>
-            <span data-crop-summary>Full frame</span>
-          </div>
-
-          <div class="crop-mode-grid" role="group" aria-label="Crop aspect ratio">
-            ${CROP_MODES.map(
-              (cropMode) => `
-                <button
-                  class="crop-mode-button"
-                  type="button"
-                  data-crop-mode="${cropMode.mode}"
-                  disabled
-                >
-                  ${cropMode.label}
-                </button>
-              `
-            ).join("")}
-          </div>
-
-          <label class="crop-size-control">
-            <span>Crop size</span>
-            <input type="range" min="20" max="100" value="100" step="1" data-crop-size disabled />
-          </label>
-
-          <div class="free-size-fields" data-free-size-fields>
-            <label>
-              <span>Width</span>
               <input
-                type="number"
-                min="1"
+                aria-label="Trim start"
+                type="range"
+                min="0"
+                max="${TRIM_SLIDER_MAX}"
                 value="0"
                 step="1"
-                inputmode="numeric"
-                aria-label="Free crop width in pixels"
-                data-free-crop-width
+                data-trim-start-range
                 disabled
               />
-            </label>
-            <label>
-              <span>Height</span>
               <input
-                type="number"
-                min="1"
-                value="0"
+                aria-label="Trim end"
+                type="range"
+                min="0"
+                max="${TRIM_SLIDER_MAX}"
+                value="${TRIM_SLIDER_MAX}"
                 step="1"
-                inputmode="numeric"
-                aria-label="Free crop height in pixels"
-                data-free-crop-height
+                data-trim-end-range
                 disabled
               />
-            </label>
-            <span class="free-size-state" data-free-size-state>Free</span>
-          </div>
-        </section>
+            </div>
+          </section>
 
-        <section class="size-panel" aria-labelledby="size-title">
-          <div class="size-heading">
-            <h3 id="size-title">Resize</h3>
-            <span data-size-summary>Original</span>
-          </div>
+          <section class="crop-panel" aria-labelledby="crop-title">
+            <div class="crop-heading">
+              <h3 id="crop-title">Crop</h3>
+              <span data-crop-summary>Full frame</span>
+            </div>
 
-          <div class="size-mode-row">
-            <div class="size-preset-grid" role="group" aria-label="Resize preset">
-              ${RESIZE_PRESETS.map(
-                (preset) => `
+            <div class="crop-mode-grid" role="group" aria-label="Crop aspect ratio">
+              ${CROP_MODES.map(
+                (cropMode) => `
                   <button
-                    class="size-preset-button"
+                    class="crop-mode-button"
                     type="button"
-                    data-resize-mode="${preset.mode}"
+                    data-crop-mode="${cropMode.mode}"
                     disabled
                   >
-                    ${preset.label}
+                    ${cropMode.label}
                   </button>
                 `
               ).join("")}
             </div>
-            <label class="size-option">
-              <input type="checkbox" data-resize-aspect checked disabled />
-              <span>Keep aspect</span>
+
+            <label class="crop-size-control">
+              <span>Crop size</span>
+              <input type="range" min="20" max="100" value="100" step="1" data-crop-size disabled />
             </label>
-          </div>
 
-          <div class="size-fields">
-            <label>
-              <span>Width</span>
-              <input
-                type="number"
-                min="2"
-                value="0"
-                step="2"
-                inputmode="numeric"
-                aria-label="Resize width in pixels"
-                data-resize-width
-                disabled
-              />
-            </label>
-            <label>
-              <span>Height</span>
-              <input
-                type="number"
-                min="2"
-                value="0"
-                step="2"
-                inputmode="numeric"
-                aria-label="Resize height in pixels"
-                data-resize-height
-                disabled
-              />
-            </label>
-          </div>
-
-        </section>
-
-        <div class="control-grid">
-          ${initialControlTiles
-            .map(
-              (control) => `
-                <div class="control-tile">
-                  <div>
-                    <h3>${control.title}</h3>
-                    <p>${control.note}</p>
-                  </div>
-                  <span>${control.value}</span>
-                </div>
-              `
-            )
-            .join("")}
-        </div>
-
-        <div class="quick-actions" aria-label="History controls">
-          <button class="button" type="button" disabled>Undo</button>
-          <button class="button" type="button" data-reset-source disabled>Reset</button>
-        </div>
-
-        <section class="export-strip" aria-labelledby="export-title">
-          <div class="export-heading">
-            <div>
-              <span class="section-kicker">Output</span>
-              <h2 id="export-title">Export</h2>
+            <div class="free-size-fields" data-free-size-fields>
+              <label>
+                <span>Width</span>
+                <input
+                  type="number"
+                  min="1"
+                  value="0"
+                  step="1"
+                  inputmode="numeric"
+                  aria-label="Free crop width in pixels"
+                  data-free-crop-width
+                  disabled
+                />
+              </label>
+              <label>
+                <span>Height</span>
+                <input
+                  type="number"
+                  min="1"
+                  value="0"
+                  step="1"
+                  inputmode="numeric"
+                  aria-label="Free crop height in pixels"
+                  data-free-crop-height
+                  disabled
+                />
+              </label>
+              <span class="free-size-state" data-free-size-state>Free</span>
             </div>
-            <span class="status-pill status-pill-muted" data-export-status>Not ready</span>
+          </section>
+
+          <section class="size-panel" aria-labelledby="size-title">
+            <div class="size-heading">
+              <h3 id="size-title">Resize</h3>
+              <span data-size-summary>Original</span>
+            </div>
+
+            <div class="size-mode-row">
+              <div class="size-preset-grid" role="group" aria-label="Resize preset">
+                ${RESIZE_PRESETS.map(
+                  (preset) => `
+                    <button
+                      class="size-preset-button"
+                      type="button"
+                      data-resize-mode="${preset.mode}"
+                      disabled
+                    >
+                      ${preset.label}
+                    </button>
+                  `
+                ).join("")}
+              </div>
+              <label class="size-option">
+                <input type="checkbox" data-resize-aspect checked disabled />
+                <span>Keep aspect</span>
+              </label>
+            </div>
+
+            <div class="size-fields">
+              <label>
+                <span>Width</span>
+                <input
+                  type="number"
+                  min="2"
+                  value="0"
+                  step="2"
+                  inputmode="numeric"
+                  aria-label="Resize width in pixels"
+                  data-resize-width
+                  disabled
+                />
+              </label>
+              <label>
+                <span>Height</span>
+                <input
+                  type="number"
+                  min="2"
+                  value="0"
+                  step="2"
+                  inputmode="numeric"
+                  aria-label="Resize height in pixels"
+                  data-resize-height
+                  disabled
+                />
+              </label>
+            </div>
+
+          </section>
+
+          <div class="control-grid">
+            ${initialControlTiles
+              .map(
+                (control) => `
+                  <div class="control-tile">
+                    <div>
+                      <h3>${control.title}</h3>
+                      <p>${control.note}</p>
+                    </div>
+                    <span>${control.value}</span>
+                  </div>
+                `
+              )
+              .join("")}
           </div>
 
-          <div class="export-grid">
-            <label>
-              <span>Format</span>
-              <select data-export-format disabled>
-                <option value="mp4">MP4</option>
-                <option value="gif">GIF</option>
-              </select>
-            </label>
-            <label>
-              <span>Quality</span>
-              <select disabled>
-                <option>Standard</option>
-              </select>
-            </label>
-            <label>
-              <span>Audio</span>
-              <select data-export-audio disabled>
-                <option>Keep audio</option>
-              </select>
-            </label>
-            <button class="button primary export-button" type="button" data-export-button disabled>
-              Export MP4
-            </button>
-          </div>
+          <section class="export-strip" aria-labelledby="export-title">
+            <div class="export-heading">
+              <div>
+                <span class="section-kicker">Output</span>
+                <h2 id="export-title">Export</h2>
+              </div>
+              <span class="status-pill status-pill-muted" data-export-status>Not ready</span>
+            </div>
 
-          <div class="progress-shell" aria-label="Export progress">
-            <span class="progress-bar" data-export-progress style="width: 0%"></span>
+            <div class="export-grid">
+              <label>
+                <span>Format</span>
+                <select data-export-format disabled>
+                  <option value="mp4">MP4</option>
+                  <option value="gif">GIF</option>
+                </select>
+              </label>
+              <label>
+                <span>Quality</span>
+                <select disabled>
+                  <option>Standard</option>
+                </select>
+              </label>
+              <label>
+                <span>Audio</span>
+                <select data-export-audio disabled>
+                  <option>Keep audio</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="export-actions" aria-label="Apply and export actions">
+              <button class="button" type="button" data-assign-button disabled>Assign</button>
+              <button class="button" type="button" data-assign-reset disabled>Reset</button>
+              <button class="button primary export-button" type="button" data-export-button disabled>
+                ${EXPORT_ICON}
+                <span>Export</span>
+              </button>
+            </div>
+
+            <div class="progress-shell" aria-label="Export progress">
+              <span class="progress-bar" data-export-progress style="width: 0%"></span>
+            </div>
+          </section>
+        </div>
+
+        <div
+          class="export-tab-panel log-tab-panel is-hidden"
+          id="export-log-panel"
+          role="tabpanel"
+          aria-labelledby="export-log-tab"
+          data-export-panel="log"
+        >
+          <div class="export-terminal" aria-label="Export log terminal">
+            <div class="terminal-chrome" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <pre class="export-log" data-export-log aria-live="polite"></pre>
           </div>
-          <p class="message" data-export-message>Load a video to export.</p>
-          <pre class="export-log is-hidden" data-export-log aria-live="polite"></pre>
-          <a class="button export-download is-hidden" href="#" download data-export-download>
-            Download MP4
-          </a>
-        </section>
+        </div>
       </aside>
     </main>
   </div>
@@ -648,10 +735,10 @@ root.innerHTML = `
       aria-labelledby="export-warning-title"
       aria-describedby="export-warning-description"
     >
-      <span class="section-kicker">Export warning</span>
-      <h2 id="export-warning-title">Large GIF export</h2>
+      <span class="section-kicker">Conversion warning</span>
+      <h2 id="export-warning-title">Large GIF conversion</h2>
       <p id="export-warning-description">${GIF_EXPORT_WARNING_MESSAGE}</p>
-      <div class="export-warning-summary" aria-label="Estimated export details">
+      <div class="export-warning-summary" aria-label="Estimated conversion details">
         <span>Estimated GIF</span>
         <strong data-export-warning-size>--</strong>
       </div>
@@ -659,6 +746,22 @@ root.innerHTML = `
         <button class="button" type="button" data-export-warning-cancel>Cancel</button>
         <button class="button primary" type="button" data-export-warning-ok>OK</button>
       </div>
+    </section>
+  </div>
+
+  <div class="export-result-backdrop" data-export-result-dialog aria-hidden="true" hidden>
+    <section
+      class="export-result-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="export-result-title"
+    >
+      <h2 id="export-result-title" data-export-result-title>Successfully exported!</h2>
+      <p data-export-result-detail></p>
+      <a class="button primary export-result-download is-hidden" href="#" download data-export-result-download>
+        Download
+      </a>
+      <button class="button" type="button" data-export-result-close>OK</button>
     </section>
   </div>
 `;
@@ -708,23 +811,32 @@ const resizeModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement
 const exportStatus = query<HTMLElement>("[data-export-status]");
 const exportFormatSelect = query<HTMLSelectElement>("[data-export-format]");
 const exportAudioSelect = query<HTMLSelectElement>("[data-export-audio]");
+const assignButton = query<HTMLButtonElement>("[data-assign-button]");
+const assignResetButton = query<HTMLButtonElement>("[data-assign-reset]");
 const exportButton = query<HTMLButtonElement>("[data-export-button]");
 const exportProgress = query<HTMLElement>("[data-export-progress]");
-const exportMessage = query<HTMLElement>("[data-export-message]");
 const exportLog = query<HTMLPreElement>("[data-export-log]");
-const exportDownload = query<HTMLAnchorElement>("[data-export-download]");
+const exportTabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-export-tab]"));
+const exportTabPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-export-panel]"));
 const exportWarningDialog = query<HTMLDivElement>("[data-export-warning-dialog]");
 const exportWarningSize = query<HTMLElement>("[data-export-warning-size]");
 const exportWarningCancelButton = query<HTMLButtonElement>("[data-export-warning-cancel]");
 const exportWarningOkButton = query<HTMLButtonElement>("[data-export-warning-ok]");
+const exportResultDialog = query<HTMLDivElement>("[data-export-result-dialog]");
+const exportResultTitle = query<HTMLElement>("[data-export-result-title]");
+const exportResultDetail = query<HTMLElement>("[data-export-result-detail]");
+const exportResultDownload = query<HTMLAnchorElement>("[data-export-result-download]");
+const exportResultCloseButton = query<HTMLButtonElement>("[data-export-result-close]");
 let trimFilmstripHideTimer: number | null = null;
 let cropDragSession: CropDragSession | null = null;
 let gifPlaybackTimer: number | null = null;
 let ffmpegInstance: FFmpeg | null = null;
 let ffmpegLoadPromise: Promise<FFmpeg> | null = null;
 let latestFfmpegLog = "";
+let activeExportTab: "settings" | "log" = "settings";
 let exportWarningDialogResolve: ((confirmed: boolean) => void) | null = null;
 let exportWarningPreviousFocus: HTMLElement | null = null;
+let exportResultPreviousFocus: HTMLElement | null = null;
 
 chooseFileButton.addEventListener("click", () => fileInput.click());
 
@@ -769,7 +881,9 @@ video.addEventListener("loadedmetadata", () => {
   state.resizeWidth = state.width;
   state.resizeHeight = state.height;
   state.resizeAspectLocked = true;
+  applyPendingSettingsRestore(state.thumbnailGenerationId);
   video.currentTime = 0;
+  seekPreviewToTime(state.trimStart);
   renderLoadedState();
   void generateTrimThumbnails();
 });
@@ -878,6 +992,19 @@ exportFormatSelect.addEventListener("change", () => {
   exportState.format = readExportFormatSelectValue();
   invalidateExportOutput();
 });
+for (const button of exportTabButtons) {
+  button.addEventListener("click", () => {
+    const tab = button.dataset.exportTab;
+    if (tab === "settings" || tab === "log") {
+      activeExportTab = tab;
+      renderExportUi();
+    }
+  });
+}
+assignButton.addEventListener("click", () => {
+  void assignCurrentSource();
+});
+assignResetButton.addEventListener("click", resetAssignedSource);
 exportButton.addEventListener("click", () => {
   void exportCurrentSource();
 });
@@ -893,6 +1020,13 @@ exportWarningDialog.addEventListener("click", (event) => {
   }
 });
 exportWarningDialog.addEventListener("keydown", handleExportWarningDialogKeydown);
+exportResultCloseButton.addEventListener("click", closeExportResultDialog);
+exportResultDialog.addEventListener("click", (event) => {
+  if (event.target === exportResultDialog) {
+    closeExportResultDialog();
+  }
+});
+exportResultDialog.addEventListener("keydown", handleExportResultDialogKeydown);
 
 for (const button of resetSourceButtons) {
   button.addEventListener("click", resetSource);
@@ -931,7 +1065,11 @@ function isGifFile(file: File): boolean {
   return file.type === "image/gif" || file.name.toLowerCase().endsWith(".gif");
 }
 
-function loadSourceFile(file: File): void {
+function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
+  if (options.clearAssignCheckpoint !== false) {
+    assignCheckpoint = null;
+  }
+
   revokeSourceUrl();
   resetExportState();
   stopGifPlayback();
@@ -961,6 +1099,13 @@ function loadSourceFile(file: File): void {
   state.resizeAspectLocked = true;
   state.thumbnailGenerationId += 1;
   const generationId = state.thumbnailGenerationId;
+  pendingSettingsRestore = options.restoreSettings
+    ? {
+        generationId,
+        settings: options.restoreSettings,
+        format: options.restoreFormat ?? exportState.format
+      }
+    : null;
 
   previewStatus.textContent = "Loading";
   previewStatus.classList.add("status-pill-muted");
@@ -1012,11 +1157,12 @@ async function loadGifSource(file: File, generationId: number): Promise<void> {
     state.resizeWidth = state.width;
     state.resizeHeight = state.height;
     state.resizeAspectLocked = true;
+    applyPendingSettingsRestore(generationId);
 
     gifCanvas.width = state.width;
     gifCanvas.height = state.height;
+    setGifCurrentTime(state.trimStart);
     renderLoadedState();
-    drawGifFrame(0);
     void generateTrimThumbnails();
   } catch {
     if (isCurrentSourceGeneration(file, generationId)) {
@@ -1025,7 +1171,62 @@ async function loadGifSource(file: File, generationId: number): Promise<void> {
   }
 }
 
+function captureEditSettings(): EditSettingsSnapshot {
+  return {
+    trimStart: state.trimStart,
+    trimEnd: state.trimEnd,
+    cropMode: state.cropMode,
+    cropRect: { ...state.cropRect },
+    freeCropSizeLocked: state.freeCropSizeLocked,
+    resizeMode: state.resizeMode,
+    resizeWidth: state.resizeWidth,
+    resizeHeight: state.resizeHeight,
+    resizeAspectLocked: state.resizeAspectLocked
+  };
+}
+
+function applyPendingSettingsRestore(generationId: number): void {
+  if (!pendingSettingsRestore || pendingSettingsRestore.generationId !== generationId) {
+    return;
+  }
+
+  const restore = pendingSettingsRestore;
+  pendingSettingsRestore = null;
+  exportState.format = restore.format;
+  restoreEditSettings(restore.settings);
+}
+
+function restoreEditSettings(settings: EditSettingsSnapshot): void {
+  const minimumRange = Math.min(MIN_TRIM_SECONDS, state.duration);
+  let trimStart = clamp(settings.trimStart, 0, state.duration);
+  let trimEnd = clamp(settings.trimEnd, 0, state.duration);
+
+  if (state.sourceKind === "gif") {
+    const boundaries = getGifFrameBoundaries();
+    trimStart = boundaries[getNearestGifBoundaryIndex(trimStart, boundaries)] ?? 0;
+    trimEnd = boundaries[getNearestGifBoundaryIndex(trimEnd, boundaries)] ?? state.duration;
+  }
+
+  if (trimEnd - trimStart < minimumRange) {
+    trimStart = 0;
+    trimEnd = state.duration;
+  }
+
+  state.trimStart = roundTime(trimStart);
+  state.trimEnd = roundTime(trimEnd);
+  state.cropMode = settings.cropMode;
+  state.cropRect = state.cropMode === "full"
+    ? { ...DEFAULT_CROP_RECT }
+    : clampCropRect(settings.cropRect);
+  state.freeCropSizeLocked = state.cropMode === "free" && settings.freeCropSizeLocked;
+  state.resizeMode = settings.resizeMode;
+  state.resizeWidth = clamp(settings.resizeWidth, MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
+  state.resizeHeight = clamp(settings.resizeHeight, MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
+  state.resizeAspectLocked = settings.resizeAspectLocked;
+}
+
 function handlePreviewLoadFailure(): void {
+  pendingSettingsRestore = null;
   stopGifPlayback();
   state.canPreviewDirectly = false;
   previewStatus.textContent = "Unsupported";
@@ -2083,6 +2284,79 @@ function renderResizeUi(): void {
     : "Original";
 }
 
+async function assignCurrentSource(): Promise<void> {
+  if (!canAssignSource()) {
+    return;
+  }
+
+  const sourceFile = state.sourceFile;
+
+  if (!sourceFile) {
+    return;
+  }
+
+  const settings = captureEditSettings();
+  const format = exportState.format;
+  const commandPlan = buildAssignCommand(sourceFile);
+
+  if (!(await confirmLargeGifConversion(commandPlan))) {
+    exportState.status = "idle";
+    exportState.progress = 0;
+    exportState.message = "Assign canceled.";
+    appendExportLog("Assign canceled.");
+    renderExportUi();
+    return;
+  }
+
+  try {
+    const outputBlob = await runFfmpegTransform(commandPlan, sourceFile, "Assigning");
+    const assignedFile = createAssignedFile(sourceFile.name, outputBlob, commandPlan.format);
+    const conversionLogs = [...exportState.logs];
+    assignCheckpoint = {
+      sourceFile,
+      settings,
+      format
+    };
+    loadSourceFile(assignedFile, { clearAssignCheckpoint: false });
+    exportState.status = "idle";
+    exportState.progress = 0;
+    exportState.message = "Assigned to preview.";
+    exportState.logs = conversionLogs;
+    appendExportLog(exportState.message);
+    renderExportUi();
+  } catch (error) {
+    exportState.status = "error";
+    exportState.progress = 0;
+    exportState.message = error instanceof Error ? error.message : "Assign failed.";
+    appendExportLog(`Assign failed: ${exportState.message}`);
+    activeExportTab = "log";
+    renderExportUi();
+  }
+}
+
+function resetAssignedSource(): void {
+  if (!canResetAssignedSource()) {
+    return;
+  }
+
+  const checkpoint = assignCheckpoint;
+
+  if (!checkpoint) {
+    return;
+  }
+
+  assignCheckpoint = null;
+  loadSourceFile(checkpoint.sourceFile, {
+    restoreSettings: checkpoint.settings,
+    restoreFormat: checkpoint.format
+  });
+  exportState.status = "idle";
+  exportState.progress = 0;
+  exportState.message = "Reset to the pre-assign source.";
+  appendExportLog("Reset to the pre-assign source.");
+  renderExportUi();
+}
+
 async function exportCurrentSource(): Promise<void> {
   if (!canExportSource()) {
     return;
@@ -2096,31 +2370,86 @@ async function exportCurrentSource(): Promise<void> {
 
   const commandPlan = buildExportCommand(sourceFile);
 
-  if (!(await confirmLargeGifExport(commandPlan))) {
+  if (!(await confirmLargeGifConversion(commandPlan))) {
     exportState.status = "idle";
     exportState.progress = 0;
     exportState.message = "Export canceled.";
-    exportState.logs = [];
+    appendExportLog("Export canceled.");
     renderExportUi();
     return;
   }
 
-  const saveTarget = await requestExportSaveTarget(commandPlan);
+  let saveTarget: ExportSaveTarget | null;
+
+  try {
+    saveTarget = await requestExportSaveTarget(commandPlan);
+  } catch (error) {
+    exportState.status = "error";
+    exportState.progress = 0;
+    exportState.message = error instanceof Error ? error.message : "Export failed.";
+    appendExportLog(`Export failed: ${exportState.message}`);
+    activeExportTab = "log";
+    showExportResultDialog("error");
+    renderExportUi();
+    return;
+  }
 
   if (!saveTarget) {
     exportState.status = "idle";
     exportState.progress = 0;
     exportState.message = "Export canceled.";
-    exportState.logs = [];
+    appendExportLog("Export canceled.");
     renderExportUi();
     return;
   }
 
+  try {
+    const outputBlob = await runFfmpegTransform(commandPlan, sourceFile, "Exporting");
+
+    exportState.status = "running";
+    exportState.message = `Saving ${formatExportLabel(commandPlan.format)}...`;
+    appendExportLog(exportState.message);
+    renderExportUi();
+
+    if (saveTarget.kind === "native") {
+      await writeBlobToFileHandle(saveTarget.handle, outputBlob);
+      exportState.outputUrl = null;
+      exportState.outputFileName = saveTarget.fileName;
+      exportState.message = `Saved ${saveTarget.fileName}.`;
+      appendExportLog(exportState.message);
+    } else {
+      exportState.outputUrl = URL.createObjectURL(outputBlob);
+      exportState.outputFileName = saveTarget.fileName;
+      exportState.message = `Export complete. Use Download ${formatExportLabel(commandPlan.format)} to save.`;
+      appendExportLog("Export complete. Download fallback is ready.");
+    }
+
+    exportState.status = "done";
+    exportState.progress = 1;
+    showExportResultDialog("success");
+    renderExportUi();
+  } catch (error) {
+    exportState.status = "error";
+    exportState.progress = 0;
+    exportState.message = error instanceof Error ? error.message : "Export failed.";
+    appendExportLog(`Export failed: ${exportState.message}`);
+    activeExportTab = "log";
+    showExportResultDialog("error");
+    renderExportUi();
+  }
+}
+
+async function runFfmpegTransform(
+  commandPlan: ExportCommandPlan,
+  sourceFile: File,
+  runningMessage: string
+): Promise<Blob> {
   resetExportOutput();
   exportState.status = "loading-ffmpeg";
   exportState.progress = 0;
   exportState.message = "Loading FFmpeg...";
   exportState.logs = [];
+  appendExportLog(exportState.message);
   latestFfmpegLog = "";
   renderExportUi();
 
@@ -2133,12 +2462,14 @@ async function exportCurrentSource(): Promise<void> {
     exportState.status = "running";
     exportState.progress = 0.04;
     exportState.message = "Preparing source...";
+    appendExportLog(exportState.message);
     renderExportUi();
 
     await prepareExportCommandInput(ffmpeg, commandPlan, sourceFile, workFiles);
 
     exportState.progress = Math.max(exportState.progress, 0.16);
-    exportState.message = `Exporting ${formatExportLabel(commandPlan.format)}...`;
+    exportState.message = `${runningMessage} ${formatExportLabel(commandPlan.format)}...`;
+    appendExportLog(exportState.message);
     renderExportUi();
 
     const exitCode = await ffmpeg.exec(commandPlan.args);
@@ -2153,34 +2484,12 @@ async function exportCurrentSource(): Promise<void> {
       : exportedFile;
     const outputBytes = new Uint8Array(exportedBytes.byteLength);
     outputBytes.set(exportedBytes);
-    const outputBlob = new Blob([outputBytes.buffer], { type: commandPlan.outputMimeType });
 
-    exportState.message = `Saving ${formatExportLabel(commandPlan.format)}...`;
-    renderExportUi();
-
-    if (saveTarget.kind === "native") {
-      await writeBlobToFileHandle(saveTarget.handle, outputBlob);
-      exportState.outputUrl = null;
-      exportState.outputFileName = saveTarget.fileName;
-      exportState.message = `Saved ${saveTarget.fileName}.`;
-    } else {
-      exportState.outputUrl = URL.createObjectURL(outputBlob);
-      exportState.outputFileName = saveTarget.fileName;
-      exportState.message = `Export complete. Use Download ${formatExportLabel(commandPlan.format)} to save.`;
-    }
-
-    exportState.status = "done";
-    exportState.progress = 1;
-  } catch (error) {
-    exportState.status = "error";
-    exportState.progress = 0;
-    exportState.message = error instanceof Error ? error.message : "Export failed.";
+    return new Blob([outputBytes.buffer], { type: commandPlan.outputMimeType });
   } finally {
     if (ffmpeg) {
       await safeDeleteFfmpegFiles(ffmpeg, Array.from(workFiles));
     }
-
-    renderExportUi();
   }
 }
 
@@ -2225,7 +2534,7 @@ async function prepareGifExportInput(ffmpeg: FFmpeg, workFiles: Set<string>): Pr
   const context = canvas.getContext("2d");
 
   if (!context) {
-    throw new Error("Canvas is not available for GIF export.");
+    throw new Error("Canvas is not available for GIF conversion.");
   }
 
   canvas.width = geometry.outputWidth;
@@ -2291,7 +2600,7 @@ function getGifExportGeometry(): GifExportGeometry {
   const outputHeight = clampOutputSizeValue(resizeSize.height || crop.height);
 
   if (crop.width <= 0 || crop.height <= 0 || outputWidth <= 0 || outputHeight <= 0) {
-    throw new Error("GIF export dimensions are invalid.");
+    throw new Error("GIF conversion dimensions are invalid.");
   }
 
   return {
@@ -2325,7 +2634,7 @@ function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (!blob) {
-        reject(new Error("Could not encode GIF export frame."));
+        reject(new Error("Could not encode GIF conversion frame."));
         return;
       }
 
@@ -2412,7 +2721,23 @@ function canExportSource(): boolean {
   return state.sourceKind === "gif" && state.gifFrames.length > 0;
 }
 
-async function confirmLargeGifExport(commandPlan: ExportCommandPlan): Promise<boolean> {
+function canAssignSource(): boolean {
+  return canExportSource() && hasPendingEditSettings();
+}
+
+function canResetAssignedSource(): boolean {
+  return assignCheckpoint !== null && !isExportBusy();
+}
+
+function hasPendingEditSettings(): boolean {
+  if (!state.canPreviewDirectly || state.duration <= 0) {
+    return false;
+  }
+
+  return isTrimActive() || state.cropMode !== "full" || state.resizeMode !== "original";
+}
+
+async function confirmLargeGifConversion(commandPlan: ExportCommandPlan): Promise<boolean> {
   const estimate = getGifExportSizeEstimate(commandPlan);
 
   if (!estimate || estimate.estimatedBytes < GIF_EXPORT_WARNING_BYTES) {
@@ -2482,6 +2807,77 @@ function handleExportWarningDialogKeydown(event: KeyboardEvent): void {
 
   event.preventDefault();
   focusableButtons[nextIndex].focus();
+}
+
+function showExportResultDialog(result: "success" | "error"): void {
+  const isSuccess = result === "success";
+  const hasDownloadFallback = isSuccess && exportState.outputUrl !== null && exportState.outputFileName !== null;
+
+  exportResultTitle.textContent = isSuccess ? "Successfully exported!" : "Export failed!";
+  exportResultDetail.textContent = isSuccess
+    ? hasDownloadFallback
+      ? "The export is ready. Use Download to save the file."
+      : "The file was saved successfully."
+    : "Check the Log tab for details.";
+
+  if (hasDownloadFallback && exportState.outputUrl && exportState.outputFileName) {
+    exportResultDownload.href = exportState.outputUrl;
+    exportResultDownload.download = exportState.outputFileName;
+    exportResultDownload.textContent = `Download ${formatExportLabel(getCurrentExportFormat())}`;
+    exportResultDownload.classList.remove("is-hidden");
+  } else {
+    hideExportResultDownload();
+  }
+
+  exportResultPreviousFocus =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  exportResultDialog.hidden = false;
+  exportResultDialog.setAttribute("aria-hidden", "false");
+  exportResultCloseButton.focus();
+}
+
+function closeExportResultDialog(): void {
+  if (exportResultDialog.hidden) {
+    return;
+  }
+
+  exportResultDialog.hidden = true;
+  exportResultDialog.setAttribute("aria-hidden", "true");
+
+  if (exportResultPreviousFocus && document.contains(exportResultPreviousFocus)) {
+    exportResultPreviousFocus.focus();
+  }
+
+  exportResultPreviousFocus = null;
+}
+
+function handleExportResultDialogKeydown(event: KeyboardEvent): void {
+  if (exportResultDialog.hidden) {
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeExportResultDialog();
+    return;
+  }
+
+  if (event.key !== "Tab") {
+    return;
+  }
+
+  const focusableElements: HTMLElement[] = exportResultDownload.classList.contains("is-hidden")
+    ? [exportResultCloseButton]
+    : [exportResultDownload, exportResultCloseButton];
+  const currentIndex = focusableElements.indexOf(document.activeElement as HTMLElement);
+  const direction = event.shiftKey ? -1 : 1;
+  const nextIndex =
+    currentIndex === -1
+      ? 0
+      : (currentIndex + direction + focusableElements.length) % focusableElements.length;
+
+  event.preventDefault();
+  focusableElements[nextIndex].focus();
 }
 
 function getGifExportSizeEstimate(commandPlan?: ExportCommandPlan): GifExportSizeEstimate | null {
@@ -2610,7 +3006,7 @@ function handleFfmpegLog(event: LogEvent): void {
   }
 
   latestFfmpegLog = message;
-  exportState.logs = [...exportState.logs, message].slice(-18);
+  appendExportLog(message);
 
   if (isExportBusy()) {
     renderExportUi();
@@ -2632,6 +3028,14 @@ function buildExportCommand(sourceFile: File): ExportCommandPlan {
   }
 
   return buildVideoExportCommand(sourceFile, getCurrentExportFormat());
+}
+
+function buildAssignCommand(sourceFile: File): ExportCommandPlan {
+  if (state.sourceKind === "gif") {
+    return buildGifExportCommand(sourceFile, "gif");
+  }
+
+  return buildVideoExportCommand(sourceFile, "mp4");
 }
 
 function buildVideoExportCommand(sourceFile: File, format: ExportFormat): ExportCommandPlan {
@@ -2816,6 +3220,8 @@ function renderExportUi(): void {
   const dialogOpen = isExportWarningDialogOpen();
   const currentFormat = getCurrentExportFormat();
   const canExport = canExportSource() && !dialogOpen;
+  const canAssign = canAssignSource() && !dialogOpen;
+  const canResetAssign = canResetAssignedSource() && !dialogOpen;
   exportFormatSelect.value = currentFormat;
   exportFormatSelect.disabled =
     busy ||
@@ -2824,8 +3230,9 @@ function renderExportUi(): void {
     (state.sourceKind !== "video" && state.sourceKind !== "gif");
   exportAudioSelect.options[0].textContent =
     state.sourceKind === "video" && currentFormat === "mp4" ? "Keep audio" : "No audio";
+  assignButton.disabled = !canAssign;
+  assignResetButton.disabled = !canResetAssign;
   exportButton.disabled = !canExport;
-  exportButton.textContent = busy ? "Exporting..." : `Export ${formatExportLabel(currentFormat)}`;
   exportProgress.style.width = `${Math.round(clamp(exportState.progress, 0, 1) * 100)}%`;
 
   exportStatus.classList.remove("status-pill-muted", "status-pill-warning");
@@ -2844,43 +3251,43 @@ function renderExportUi(): void {
     exportStatus.classList.add("status-pill-muted");
   }
 
-  exportMessage.textContent = getExportMessage();
-  renderExportLog();
-  exportDownload.classList.toggle("is-hidden", !exportState.outputUrl);
-
-  if (exportState.outputUrl && exportState.outputFileName) {
-    exportDownload.href = exportState.outputUrl;
-    exportDownload.download = exportState.outputFileName;
-    exportDownload.textContent = `Download ${formatExportLabel(currentFormat)}`;
-  } else {
-    exportDownload.removeAttribute("href");
-    exportDownload.removeAttribute("download");
-    exportDownload.textContent = `Download ${formatExportLabel(currentFormat)}`;
+  for (const button of exportTabButtons) {
+    const isSelected = button.dataset.exportTab === activeExportTab;
+    button.classList.toggle("is-selected", isSelected);
+    button.setAttribute("aria-selected", String(isSelected));
+    button.tabIndex = isSelected ? 0 : -1;
   }
+
+  for (const panel of exportTabPanels) {
+    panel.classList.toggle("is-hidden", panel.dataset.exportPanel !== activeExportTab);
+  }
+
+  renderExportLog();
 }
 
 function renderExportLog(): void {
-  const shouldShowLog =
-    exportState.logs.length > 0 && (isExportBusy() || exportState.status === "error");
-
-  exportLog.classList.toggle("is-hidden", !shouldShowLog);
-  exportLog.textContent = shouldShowLog ? exportState.logs.join("\n") : "";
+  exportLog.textContent = exportState.logs.join("\n");
+  exportLog.scrollTop = exportLog.scrollHeight;
 }
 
-function getExportMessage(): string {
-  if (exportState.status === "done" || exportState.status === "error" || isExportBusy()) {
-    return exportState.message;
+function appendExportLog(message: string): void {
+  const trimmedMessage = message.trim();
+
+  if (!trimmedMessage) {
+    return;
   }
 
-  if (exportState.status === "idle" && exportState.message === "Export canceled.") {
-    return exportState.message;
-  }
+  exportState.logs = [...exportState.logs, trimmedMessage].slice(-EXPORT_LOG_MAX_LINES);
+  renderExportLog();
+}
 
-  if ((state.sourceKind === "video" || state.sourceKind === "gif") && state.canPreviewDirectly) {
-    return `Ready to export ${formatExportLabel(getCurrentExportFormat())}.`;
-  }
-
-  return "Load a video to export.";
+function isIdleExportNoticeMessage(message: string): boolean {
+  return [
+    "Assign canceled.",
+    "Assigned to preview.",
+    "Export canceled.",
+    "Reset to the pre-assign source."
+  ].includes(message);
 }
 
 function isExportWarningDialogOpen(): boolean {
@@ -2903,6 +3310,9 @@ function invalidateExportOutput(): void {
   }
 
   if (!exportState.outputUrl && exportState.status === "idle") {
+    if (isIdleExportNoticeMessage(exportState.message)) {
+      exportState.message = "Load a video to export.";
+    }
     renderExportUi();
     return;
   }
@@ -2922,6 +3332,13 @@ function resetExportOutput(): void {
 
   exportState.outputUrl = null;
   exportState.outputFileName = null;
+  hideExportResultDownload();
+}
+
+function hideExportResultDownload(): void {
+  exportResultDownload.classList.add("is-hidden");
+  exportResultDownload.removeAttribute("href");
+  exportResultDownload.removeAttribute("download");
 }
 
 async function safeDeleteFfmpegFile(ffmpeg: FFmpeg, fileName: string): Promise<void> {
@@ -2946,6 +3363,14 @@ function getFileExtension(fileName: string): string {
 function getExportFileName(fileName: string, format: ExportFormat): string {
   const baseName = fileName.replace(/\.[^/.]+$/, "") || "video";
   return `${baseName}_frametuner.${format}`;
+}
+
+function createAssignedFile(sourceFileName: string, blob: Blob, format: ExportFormat): File {
+  const baseName = sourceFileName.replace(/\.[^/.]+$/, "") || "video";
+  return new File([blob], `${baseName}_assigned.${format}`, {
+    type: getExportMimeType(format),
+    lastModified: Date.now()
+  });
 }
 
 function formatFfmpegSeconds(value: number): string {
@@ -3350,6 +3775,8 @@ function setPreviewControlsEnabled(enabled: boolean): void {
 }
 
 function resetSource(): void {
+  assignCheckpoint = null;
+  pendingSettingsRestore = null;
   revokeSourceUrl();
   resetExportState();
   stopGifPlayback();

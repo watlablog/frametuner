@@ -54,6 +54,7 @@ button,
 input,
 select {
   font: inherit;
+  min-width: 0;
 }
 
 button:focus-visible,
@@ -147,10 +148,10 @@ p {
 
 .control-panel {
   display: grid;
-  grid-template-rows: auto auto auto auto auto minmax(0, auto);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
   padding: 10px;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .control-panel > * {
@@ -1273,18 +1274,72 @@ input:disabled {
   white-space: nowrap;
 }
 
-.quick-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
 .export-strip {
   display: grid;
   gap: 7px;
   min-height: 0;
   border-top: 1px solid rgba(141, 189, 255, 0.18);
   padding-top: 8px;
+}
+
+.export-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  border: 1px solid rgba(141, 189, 255, 0.16);
+  border-radius: 10px;
+  padding: 3px;
+  background: rgba(3, 11, 22, 0.44);
+}
+
+.export-tab {
+  min-width: 0;
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 8px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.export-tab:hover {
+  color: var(--text);
+}
+
+.export-tab:focus-visible {
+  outline: 2px solid rgba(78, 166, 255, 0.88);
+  outline-offset: 2px;
+}
+
+.export-tab.is-selected {
+  color: #ffffff;
+  background: rgba(78, 166, 255, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(141, 189, 255, 0.16);
+}
+
+.export-tab-panel {
+  display: grid;
+  gap: 7px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.export-tab-panel.is-hidden {
+  display: none;
+}
+
+.setting-tab-panel {
+  align-content: start;
+  overflow: auto;
+  overflow-x: hidden;
+  padding-right: 1px;
+}
+
+.log-tab-panel {
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .export-grid {
@@ -1312,8 +1367,23 @@ input:disabled {
   background: var(--surface-subtle);
 }
 
+.export-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.export-actions .button {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  justify-content: center;
+}
+
 .export-button {
-  grid-column: 1 / -1;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
 }
 
 .progress-shell {
@@ -1324,45 +1394,71 @@ input:disabled {
   background: rgba(3, 11, 22, 0.72);
 }
 
-.export-strip .message {
-  min-height: 1.1rem;
-  color: var(--muted);
-  font-size: 0.72rem;
-  line-height: 1.35;
+.export-terminal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(141, 189, 255, 0.18);
+  border-radius: 10px;
+  background: #06090d;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.terminal-chrome {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid rgba(141, 189, 255, 0.11);
+  padding: 7px 9px;
+  background: linear-gradient(180deg, rgba(42, 48, 56, 0.9), rgba(22, 27, 34, 0.92));
+}
+
+.terminal-chrome span {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+}
+
+.terminal-chrome span:nth-child(1) {
+  background: #ff5f57;
+}
+
+.terminal-chrome span:nth-child(2) {
+  background: #ffbd2e;
+}
+
+.terminal-chrome span:nth-child(3) {
+  background: #28c840;
 }
 
 .export-log {
-  max-height: 96px;
+  min-height: 108px;
+  max-height: 138px;
   overflow: auto;
   margin: 0;
-  border: 1px solid rgba(255, 185, 115, 0.2);
-  border-radius: 7px;
-  padding: 7px;
-  color: rgba(255, 214, 174, 0.92);
-  background: rgba(13, 8, 6, 0.5);
+  padding: 10px;
+  color: rgba(204, 239, 216, 0.92);
+  background: #05070a;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.66rem;
-  line-height: 1.35;
+  font-size: 0.68rem;
+  line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.export-log.is-hidden {
-  display: none;
+.log-tab-panel .export-log {
+  height: 100%;
+  max-height: none;
 }
 
-.export-download {
-  display: inline-flex;
-  justify-content: center;
-  width: 100%;
-  min-height: 31px;
+.export-log:empty::before {
+  content: "No logs yet.";
+  color: rgba(166, 180, 199, 0.58);
 }
 
-.export-download.is-hidden {
-  display: none;
-}
-
-.export-warning-backdrop {
+.export-warning-backdrop,
+.export-result-backdrop {
   position: fixed;
   z-index: 30;
   inset: 0;
@@ -1373,11 +1469,13 @@ input:disabled {
   backdrop-filter: blur(10px);
 }
 
-.export-warning-backdrop[hidden] {
+.export-warning-backdrop[hidden],
+.export-result-backdrop[hidden] {
   display: none;
 }
 
-.export-warning-dialog {
+.export-warning-dialog,
+.export-result-dialog {
   display: grid;
   gap: 12px;
   width: min(420px, 100%);
@@ -1389,9 +1487,20 @@ input:disabled {
   box-shadow: 0 24px 70px rgba(0, 4, 14, 0.48);
 }
 
+.export-result-dialog {
+  border-color: rgba(141, 189, 255, 0.34);
+  text-align: center;
+}
+
 .export-warning-dialog h2 {
   color: #ffffff;
   font-size: 1.15rem;
+  line-height: 1.15;
+}
+
+.export-result-dialog h2 {
+  color: #ffffff;
+  font-size: 1.18rem;
   line-height: 1.15;
 }
 
@@ -1399,6 +1508,22 @@ input:disabled {
   color: var(--success);
   font-size: 0.88rem;
   line-height: 1.48;
+}
+
+.export-result-dialog p {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.export-result-download {
+  display: inline-flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.export-result-download.is-hidden {
+  display: none;
 }
 
 .export-warning-summary {
@@ -1453,6 +1578,20 @@ input:disabled {
   .control-panel {
     overflow: visible;
   }
+
+  .setting-tab-panel,
+  .log-tab-panel {
+    overflow: visible;
+  }
+
+  .log-tab-panel .export-terminal {
+    min-height: 220px;
+  }
+
+  .log-tab-panel .export-log {
+    min-height: 170px;
+    max-height: 320px;
+  }
 }
 
 @media (max-width: 700px) {
@@ -1500,7 +1639,7 @@ input:disabled {
 
 @media (max-width: 520px) {
   .app-shell {
-    width: min(100% - 12px, 520px);
+    width: min(100% - 20px, 520px);
     gap: 6px;
     padding: 6px 0;
   }
@@ -1706,6 +1845,7 @@ input:disabled {
   }
 
   .size-mode-row {
+    grid-template-columns: 1fr;
     gap: 5px;
   }
 
@@ -1770,8 +1910,8 @@ input:disabled {
     padding: 5px 6px;
   }
 
-  .export-button {
-    grid-column: 1 / -1;
+  .export-actions {
+    gap: 6px;
   }
 
   .button {
@@ -1780,24 +1920,25 @@ input:disabled {
     font-size: 0.78rem;
   }
 
-  .quick-actions {
-    order: 3;
-    gap: 6px;
-  }
-
   .export-strip {
-    order: 4;
+    order: 3;
     gap: 7px;
     padding-top: 8px;
   }
 
-  .export-strip .message {
-    display: none;
+  .export-log {
+    min-height: 84px;
+    max-height: 96px;
+    font-size: 0.62rem;
   }
 
-  .export-log {
-    max-height: 76px;
-    font-size: 0.62rem;
+  .log-tab-panel .export-log {
+    min-height: 160px;
+    max-height: 260px;
+  }
+
+  .terminal-chrome {
+    padding: 6px 8px;
   }
 }
 
