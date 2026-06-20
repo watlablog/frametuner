@@ -291,6 +291,13 @@ const FOLDER_OPEN_ICON = `
   </svg>
 `;
 
+const CLEAR_ICON = `
+  <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M9 3.5h6a1 1 0 0 1 1 1V6h4a1 1 0 1 1 0 2H4a1 1 0 0 1 0-2h4V4.5a1 1 0 0 1 1-1Zm1 2.5h4v-.5h-4V6Z" />
+    <path d="M6.2 9.5h11.6l-.7 9.1a2.1 2.1 0 0 1-2.1 1.9H9a2.1 2.1 0 0 1-2.1-1.9l-.7-9.1Zm4.2 2.3a.8.8 0 0 0-.8.8v4.2a.8.8 0 0 0 1.6 0v-4.2a.8.8 0 0 0-.8-.8Zm3.2 0a.8.8 0 0 0-.8.8v4.2a.8.8 0 0 0 1.6 0v-4.2a.8.8 0 0 0-.8-.8Z" />
+  </svg>
+`;
+
 const EXPORT_ICON = `
   <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <path d="M12 3.5a1 1 0 0 1 1 1v8.1l2.7-2.7a1 1 0 1 1 1.4 1.4l-4.4 4.4a1 1 0 0 1-1.4 0l-4.4-4.4a1 1 0 1 1 1.4-1.4l2.7 2.7V4.5a1 1 0 0 1 1-1Z" />
@@ -377,7 +384,8 @@ root.innerHTML = `
               <span>Open</span>
             </button>
             <button class="button compact-button clear-button" type="button" data-reset-source disabled>
-              Clear
+              ${CLEAR_ICON}
+              <span>Clear</span>
             </button>
           </div>
         </div>
@@ -411,7 +419,7 @@ root.innerHTML = `
           </div>
           <div class="video-placeholder" data-video-placeholder>
             <span class="preview-monogram" aria-hidden="true">FT</span>
-            <p>Load a short clip to preview it here.</p>
+            <p>Drop a video or GIF onto this preview window to load it.</p>
           </div>
         </div>
 
@@ -460,7 +468,7 @@ root.innerHTML = `
             id="export-settings-tab"
             data-export-tab="settings"
           >
-            Setting
+            Settings
           </button>
           <button
             class="export-tab"
@@ -664,8 +672,7 @@ root.innerHTML = `
           <section class="export-strip" aria-labelledby="export-title">
             <div class="export-heading">
               <div>
-                <span class="section-kicker">Output</span>
-                <h2 id="export-title">Export</h2>
+                <h2 id="export-title">Output</h2>
               </div>
               <span class="status-pill status-pill-muted" data-export-status>Not ready</span>
             </div>
