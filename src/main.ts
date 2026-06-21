@@ -41,6 +41,7 @@ type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
 type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 type ResizeMode = "original" | "custom";
 type ExportFormat = "mp4" | "gif" | "png" | "jpeg" | "bmp";
+type ImageSequenceFormat = "png" | "jpeg" | "bmp";
 type ExportJobStatus = "idle" | "loading-ffmpeg" | "running" | "done" | "error";
 
 type GifFrame = {
@@ -128,7 +129,7 @@ type ExportJobState = {
 type ExportCommandPlan = {
   sourceKind: "video" | "gif" | "image";
   format: ExportFormat;
-  execution: "ffmpeg" | "canvas";
+  execution: "ffmpeg" | "canvas" | "image-sequence";
   inputName: string | null;
   outputName: string;
   outputFileName: string;
@@ -136,6 +137,7 @@ type ExportCommandPlan = {
   saveDescription: string;
   saveAccept: Record<string, string[]>;
   args: string[];
+  sequenceOutputDirectory?: string;
 };
 
 type EditSettingsSnapshot = {
@@ -203,6 +205,16 @@ type FileSystemFileHandleLike = {
   createWritable(): Promise<FileSystemWritableFileStreamLike>;
 };
 
+type FileSystemDirectoryHandleLike = {
+  name?: string;
+  getFileHandle(
+    name: string,
+    options?: {
+      create?: boolean;
+    }
+  ): Promise<FileSystemFileHandleLike>;
+};
+
 type SaveFilePickerOptionsLike = {
   suggestedName?: string;
   types?: Array<{
@@ -212,8 +224,16 @@ type SaveFilePickerOptionsLike = {
   excludeAcceptAllOption?: boolean;
 };
 
+type DirectoryPickerOptionsLike = {
+  mode?: "read" | "readwrite";
+};
+
 type SaveFilePickerWindow = Window & typeof globalThis & {
   showSaveFilePicker?: (options?: SaveFilePickerOptionsLike) => Promise<FileSystemFileHandleLike>;
+};
+
+type DirectoryPickerWindow = Window & typeof globalThis & {
+  showDirectoryPicker?: (options?: DirectoryPickerOptionsLike) => Promise<FileSystemDirectoryHandleLike>;
 };
 
 type ExportSaveTarget =
@@ -226,6 +246,12 @@ type ExportSaveTarget =
       kind: "download";
       fileName: string;
     };
+
+type ImageSequenceSaveTarget = {
+  handle: FileSystemDirectoryHandleLike;
+  directoryName: string;
+  baseName: string;
+};
 
 const TRIM_SLIDER_MAX = 1000;
 const MIN_TRIM_SECONDS = 0.1;
@@ -1125,6 +1151,13 @@ cropBox.addEventListener("keydown", handleCropKeyboard);
 exportFormatSelect.addEventListener("change", () => {
   exportState.format = readExportFormatSelectValue();
   invalidateExportOutput();
+  const unavailableReason = getExportUnavailableReason(exportState.format);
+
+  if (unavailableReason) {
+    appendExportLog(unavailableReason);
+  }
+
+  renderExportUi();
 });
 for (const button of exportTabButtons) {
   button.addEventListener("click", () => {
@@ -3322,6 +3355,11 @@ async function exportCurrentSource(): Promise<void> {
     return;
   }
 
+  if (isImageSequenceExportPlan(commandPlan)) {
+    await exportImageSequenceSource(commandPlan, sourceFile);
+    return;
+  }
+
   let saveTarget: ExportSaveTarget | null;
 
   try {
@@ -3391,7 +3429,64 @@ async function runSourceTransform(
     return runCanvasImageTransform(commandPlan, runningMessage);
   }
 
+  if (commandPlan.execution === "image-sequence") {
+    throw new Error("Image sequence export requires a folder target.");
+  }
+
   return runFfmpegTransform(commandPlan, sourceFile, runningMessage);
+}
+
+async function exportImageSequenceSource(
+  commandPlan: ExportCommandPlan,
+  sourceFile: File
+): Promise<void> {
+  let saveTarget: ImageSequenceSaveTarget | null;
+
+  try {
+    saveTarget = await requestImageSequenceSaveTarget();
+  } catch (error) {
+    exportState.status = "error";
+    exportState.progress = 0;
+    exportState.message = error instanceof Error ? error.message : "Export failed.";
+    appendExportLog(`Export failed: ${exportState.message}`);
+    activeExportTab = "log";
+    showExportResultDialog("error");
+    renderExportUi();
+    return;
+  }
+
+  if (!saveTarget) {
+    exportState.status = "idle";
+    exportState.progress = 0;
+    exportState.message = "Export canceled.";
+    appendExportLog("Export canceled.");
+    renderExportUi();
+    return;
+  }
+
+  try {
+    const savedCount = state.sourceKind === "video"
+      ? await runVideoImageSequenceExport(commandPlan, sourceFile, saveTarget)
+      : await runCanvasImageSequenceExport(commandPlan, saveTarget);
+
+    exportState.status = "done";
+    exportState.progress = 1;
+    exportState.outputUrl = null;
+    exportState.outputFileName = saveTarget.directoryName;
+    exportState.message =
+      `Saved ${savedCount} ${formatExportLabel(commandPlan.format)} images to ${saveTarget.directoryName}.`;
+    appendExportLog(exportState.message);
+    showExportResultDialog("success");
+    renderExportUi();
+  } catch (error) {
+    exportState.status = "error";
+    exportState.progress = 0;
+    exportState.message = error instanceof Error ? error.message : "Export failed.";
+    appendExportLog(`Export failed: ${exportState.message}`);
+    activeExportTab = "log";
+    showExportResultDialog("error");
+    renderExportUi();
+  }
 }
 
 async function runCanvasImageTransform(
@@ -3471,6 +3566,139 @@ async function runFfmpegTransform(
       await safeDeleteFfmpegFiles(ffmpeg, Array.from(workFiles));
     }
   }
+}
+
+async function runVideoImageSequenceExport(
+  commandPlan: ExportCommandPlan,
+  sourceFile: File,
+  saveTarget: ImageSequenceSaveTarget
+): Promise<number> {
+  resetExportOutput();
+  exportState.status = "loading-ffmpeg";
+  exportState.progress = 0;
+  exportState.message = "Loading FFmpeg...";
+  exportState.logs = [];
+  appendExportLog(exportState.message);
+  latestFfmpegLog = "";
+  renderExportUi();
+
+  let ffmpeg: FFmpeg | null = null;
+  const outputDirectory = commandPlan.sequenceOutputDirectory;
+
+  if (!outputDirectory) {
+    throw new Error("Image sequence output directory is missing.");
+  }
+
+  try {
+    ffmpeg = await getLoadedFfmpeg();
+
+    exportState.status = "running";
+    exportState.progress = 0.04;
+    exportState.message = "Preparing source...";
+    appendExportLog(exportState.message);
+    renderExportUi();
+
+    await ffmpeg.createDir(outputDirectory);
+    await prepareVideoExportInput(ffmpeg, commandPlan, sourceFile, new Set<string>());
+
+    exportState.progress = 0.12;
+    exportState.message = `Exporting ${formatExportLabel(commandPlan.format)} frames...`;
+    appendExportLog(exportState.message);
+    renderExportUi();
+
+    const exitCode = await ffmpeg.exec(commandPlan.args);
+
+    if (exitCode !== 0) {
+      throw new Error(latestFfmpegLog || `FFmpeg exited with code ${exitCode}.`);
+    }
+
+    const entries = await ffmpeg.listDir(outputDirectory);
+    const frameNames = entries
+      .filter((entry) => !entry.isDir && entry.name !== "." && entry.name !== "..")
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+
+    if (frameNames.length === 0) {
+      throw new Error("No image frames were exported.");
+    }
+
+    for (let index = 0; index < frameNames.length; index += 1) {
+      const frameName = frameNames[index];
+      const exportedFile = await ffmpeg.readFile(`${outputDirectory}/${frameName}`);
+      const exportedBytes = typeof exportedFile === "string"
+        ? new TextEncoder().encode(exportedFile)
+        : exportedFile;
+      const outputBytes = new Uint8Array(exportedBytes.byteLength);
+      outputBytes.set(exportedBytes);
+      const blob = new Blob([outputBytes.buffer], { type: commandPlan.outputMimeType });
+      const outputFileName = getImageSequenceFileName(saveTarget.baseName, index, frameNames.length, commandPlan.format);
+
+      await writeBlobToDirectory(saveTarget.handle, outputFileName, blob);
+      exportState.progress = 0.18 + ((index + 1) / frameNames.length) * 0.78;
+      exportState.message = `Saving frame ${index + 1} / ${frameNames.length}...`;
+      appendExportLog(`Saved ${outputFileName}`);
+      renderExportUi();
+    }
+
+    exportState.progress = Math.max(exportState.progress, 0.98);
+    renderExportUi();
+    return frameNames.length;
+  } finally {
+    if (ffmpeg) {
+      if (commandPlan.inputName) {
+        await safeDeleteFfmpegFile(ffmpeg, commandPlan.inputName);
+      }
+
+      await safeDeleteFfmpegDirectory(ffmpeg, outputDirectory);
+    }
+  }
+}
+
+async function runCanvasImageSequenceExport(
+  commandPlan: ExportCommandPlan,
+  saveTarget: ImageSequenceSaveTarget
+): Promise<number> {
+  resetExportOutput();
+  exportState.status = "running";
+  exportState.progress = 0;
+  exportState.message = "Preparing frames...";
+  exportState.logs = [];
+  appendExportLog(exportState.message);
+  renderExportUi();
+
+  const exportFrames = getFrameSequenceExportFrames();
+
+  if (exportFrames.length === 0) {
+    throw new Error("No frames are available for image sequence export.");
+  }
+
+  const geometry = getGifExportGeometry();
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Canvas is not available for image sequence export.");
+  }
+
+  canvas.width = geometry.outputWidth;
+  canvas.height = geometry.outputHeight;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+
+  for (let index = 0; index < exportFrames.length; index += 1) {
+    const exportFrame = exportFrames[index];
+    drawExportFrameToCanvas(context, canvas, exportFrame.canvas, geometry);
+    const blob = await encodeStaticCanvas(canvas, commandPlan.format);
+    const outputFileName = getImageSequenceFileName(saveTarget.baseName, index, exportFrames.length, commandPlan.format);
+
+    await writeBlobToDirectory(saveTarget.handle, outputFileName, blob);
+    exportState.progress = 0.1 + ((index + 1) / exportFrames.length) * 0.88;
+    exportState.message = `Saving frame ${index + 1} / ${exportFrames.length}...`;
+    appendExportLog(`Saved ${outputFileName}`);
+    renderExportUi();
+  }
+
+  return exportFrames.length;
 }
 
 async function prepareExportCommandInput(
@@ -3804,6 +4032,31 @@ function formatConcatDuration(value: number): string {
   return Math.max(0.02, value).toFixed(6);
 }
 
+async function requestImageSequenceSaveTarget(): Promise<ImageSequenceSaveTarget | null> {
+  const directoryPicker = (window as DirectoryPickerWindow).showDirectoryPicker;
+
+  if (!directoryPicker) {
+    throw new Error("Image sequence export requires folder picker support in this browser.");
+  }
+
+  try {
+    const handle = await directoryPicker.call(window, { mode: "readwrite" });
+    const directoryName = handle.name || "frames";
+
+    return {
+      handle,
+      directoryName,
+      baseName: sanitizeFileNameBase(directoryName)
+    };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
 async function requestExportSaveTarget(commandPlan: ExportCommandPlan): Promise<ExportSaveTarget | null> {
   const saveFilePicker = (window as SaveFilePickerWindow).showSaveFilePicker;
 
@@ -3846,11 +4099,21 @@ async function writeBlobToFileHandle(handle: FileSystemFileHandleLike, blob: Blo
   await writable.close();
 }
 
+async function writeBlobToDirectory(
+  directoryHandle: FileSystemDirectoryHandleLike,
+  fileName: string,
+  blob: Blob
+): Promise<void> {
+  const fileHandle = await directoryHandle.getFileHandle(fileName, { create: true });
+  await writeBlobToFileHandle(fileHandle, blob);
+}
+
 function canExportSource(): boolean {
   if (
     state.sourceFile === null ||
     !state.canPreviewDirectly ||
-    isExportBusy()
+    isExportBusy() ||
+    getExportUnavailableReason() !== null
   ) {
     return false;
   }
@@ -3866,8 +4129,25 @@ function canExportSource(): boolean {
   return state.sourceKind === "image" && state.staticFrameCanvas !== null;
 }
 
+function getExportUnavailableReason(format = getCurrentExportFormat()): string | null {
+  if (isImageSequenceFormat(format) && !isSingleFrameSource() && !supportsDirectoryPicker()) {
+    return "Image sequence export requires folder picker support in this browser.";
+  }
+
+  return null;
+}
+
+function supportsDirectoryPicker(): boolean {
+  return typeof (window as DirectoryPickerWindow).showDirectoryPicker === "function";
+}
+
 function canAssignSource(): boolean {
-  return canExportSource() && hasPendingEditSettings();
+  return (
+    state.sourceFile !== null &&
+    state.canPreviewDirectly &&
+    !isExportBusy() &&
+    hasPendingEditSettings()
+  );
 }
 
 function canResetAssignedSource(): boolean {
@@ -3966,7 +4246,7 @@ function showExportResultDialog(result: "success" | "error"): void {
   exportResultDetail.textContent = isSuccess
     ? hasDownloadFallback
       ? "The export is ready. Use Download to save the file."
-      : "The file was saved successfully."
+      : exportState.message || "The file was saved successfully."
     : "Check the Log tab for details.";
 
   if (hasDownloadFallback && exportState.outputUrl && exportState.outputFileName) {
@@ -4107,11 +4387,11 @@ function getCurrentExportFormat(): ExportFormat {
 
 function getAvailableExportFormats(): ExportFormat[] {
   if (state.sourceKind === "video") {
-    return ["mp4", "gif"];
+    return ["mp4", "gif", "png", "jpeg", "bmp"];
   }
 
   if (state.sourceKind === "gif") {
-    return ["gif", "mp4"];
+    return ["gif", "mp4", "png", "jpeg", "bmp"];
   }
 
   if (state.sourceKind === "image") {
@@ -4123,6 +4403,14 @@ function getAvailableExportFormats(): ExportFormat[] {
 
 function isExportFormat(value: string): value is ExportFormat {
   return ["mp4", "gif", "png", "jpeg", "bmp"].includes(value);
+}
+
+function isImageSequenceFormat(format: ExportFormat): format is ImageSequenceFormat {
+  return format === "png" || format === "jpeg" || format === "bmp";
+}
+
+function isImageSequenceExportPlan(commandPlan: ExportCommandPlan): boolean {
+  return commandPlan.execution === "image-sequence";
 }
 
 function formatExportLabel(format: ExportFormat): string {
@@ -4239,6 +4527,10 @@ function buildAssignCommand(sourceFile: File): ExportCommandPlan {
 }
 
 function buildVideoExportCommand(sourceFile: File, format: ExportFormat): ExportCommandPlan {
+  if (isImageSequenceFormat(format)) {
+    return buildVideoImageSequenceExportCommand(sourceFile, format);
+  }
+
   if (format === "gif") {
     return buildVideoGifExportCommand(sourceFile);
   }
@@ -4324,7 +4616,70 @@ function buildVideoGifExportCommand(sourceFile: File): ExportCommandPlan {
   };
 }
 
+function buildVideoImageSequenceExportCommand(
+  sourceFile: File,
+  format: ImageSequenceFormat
+): ExportCommandPlan {
+  const inputName = `input.${getFileExtension(sourceFile.name)}`;
+  const outputExtension = getExportFileExtension(format);
+  const outputDirectory = `image-sequence-${Date.now()}`;
+  const outputPattern = `${outputDirectory}/frame-%09d.${outputExtension}`;
+  const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+  const args = [
+    "-y",
+    "-i", inputName,
+    "-ss", formatFfmpegSeconds(state.trimStart),
+    "-t", formatFfmpegSeconds(trimDuration),
+    "-map", "0:v:0",
+    "-an",
+    "-dn",
+    "-sn"
+  ];
+  const filters = buildVideoFilters();
+
+  if (filters.length > 0) {
+    args.push("-vf", filters.join(","));
+  }
+
+  args.push("-fps_mode", "passthrough");
+
+  if (format === "jpeg") {
+    args.push("-q:v", "2");
+  }
+
+  args.push(outputPattern);
+
+  return {
+    sourceKind: "video",
+    format,
+    execution: "image-sequence",
+    inputName,
+    outputName: outputPattern,
+    outputFileName: "",
+    outputMimeType: getExportMimeType(format),
+    saveDescription: `${formatExportLabel(format)} image sequence`,
+    saveAccept: getExportSaveAccept(format),
+    args,
+    sequenceOutputDirectory: outputDirectory
+  };
+}
+
 function buildGifExportCommand(sourceFile: File, format: ExportFormat): ExportCommandPlan {
+  if (isImageSequenceFormat(format)) {
+    return {
+      sourceKind: "gif",
+      format,
+      execution: "image-sequence",
+      inputName: null,
+      outputName: "",
+      outputFileName: "",
+      outputMimeType: getExportMimeType(format),
+      saveDescription: `${formatExportLabel(format)} image sequence`,
+      saveAccept: getExportSaveAccept(format),
+      args: []
+    };
+  }
+
   const outputName = format === "gif" ? EXPORT_GIF_OUTPUT_NAME : EXPORT_MP4_OUTPUT_NAME;
   const args = format === "gif"
     ? buildGifImageExportArgs(outputName)
@@ -4441,6 +4796,7 @@ function renderExportUi(): void {
   const dialogOpen = isExportWarningDialogOpen();
   const availableFormats = getAvailableExportFormats();
   const currentFormat = getCurrentExportFormat();
+  const unavailableReason = getExportUnavailableReason(currentFormat);
   const canExport = canExportSource() && !dialogOpen;
   const canAssign = canAssignSource() && !dialogOpen;
   const canResetAssign = canResetAssignedSource() && !dialogOpen;
@@ -4468,6 +4824,9 @@ function renderExportUi(): void {
     exportStatus.classList.add("status-pill-warning");
   } else if (busy) {
     exportStatus.textContent = exportState.status === "loading-ffmpeg" ? "Loading" : "Running";
+  } else if (unavailableReason) {
+    exportStatus.textContent = "Unsupported";
+    exportStatus.classList.add("status-pill-warning");
   } else if (canExportSource()) {
     exportStatus.textContent = "Ready";
   } else {
@@ -4600,6 +4959,26 @@ async function safeDeleteFfmpegFiles(ffmpeg: FFmpeg, fileNames: string[]): Promi
   }
 }
 
+async function safeDeleteFfmpegDirectory(ffmpeg: FFmpeg, directoryName: string): Promise<void> {
+  try {
+    const entries = await ffmpeg.listDir(directoryName);
+
+    for (const entry of entries) {
+      if (entry.name === "." || entry.name === "..") {
+        continue;
+      }
+
+      if (!entry.isDir) {
+        await safeDeleteFfmpegFile(ffmpeg, `${directoryName}/${entry.name}`);
+      }
+    }
+
+    await ffmpeg.deleteDir(directoryName);
+  } catch {
+    // The directory may not exist if FFmpeg failed before creating it.
+  }
+}
+
 function getFileExtension(fileName: string): string {
   const extension = fileName.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "");
   return extension || "mp4";
@@ -4624,6 +5003,30 @@ function getExportFileExtension(format: ExportFormat): string {
 
 function getExportFileExtensions(format: ExportFormat): string[] {
   return format === "jpeg" ? ["jpg", "jpeg"] : [getExportFileExtension(format)];
+}
+
+function getImageSequenceFileName(
+  baseName: string,
+  index: number,
+  totalFrameCount: number,
+  format: ExportFormat
+): string {
+  const padding = getImageSequencePadding(totalFrameCount);
+  return `${baseName}_${String(index).padStart(padding, "0")}.${getExportFileExtension(format)}`;
+}
+
+function getImageSequencePadding(totalFrameCount: number): number {
+  return Math.max(4, String(Math.max(1, totalFrameCount)).length + 1);
+}
+
+function sanitizeFileNameBase(name: string): string {
+  const sanitizedName = name
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/\s+/g, " ")
+    .replace(/[. ]+$/g, "")
+    .trim();
+
+  return sanitizedName || "frames";
 }
 
 function formatFfmpegSeconds(value: number): string {
