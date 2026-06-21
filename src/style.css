@@ -1469,6 +1469,7 @@ input:disabled {
   color: rgba(166, 180, 199, 0.58);
 }
 
+.source-load-backdrop,
 .gif-preprocess-backdrop,
 .export-warning-backdrop,
 .export-result-backdrop {
@@ -1482,10 +1483,81 @@ input:disabled {
   backdrop-filter: blur(10px);
 }
 
+.source-load-backdrop[hidden],
 .gif-preprocess-backdrop[hidden],
 .export-warning-backdrop[hidden],
 .export-result-backdrop[hidden] {
   display: none;
+}
+
+.source-load-dialog {
+  display: grid;
+  gap: 12px;
+  width: min(420px, 100%);
+  border: 1px solid rgba(141, 189, 255, 0.34);
+  border-radius: 14px;
+  padding: 18px;
+  color: var(--text);
+  background: rgba(8, 19, 35, 0.96);
+  box-shadow: 0 24px 70px rgba(0, 4, 14, 0.48);
+}
+
+.source-load-dialog h2 {
+  color: #ffffff;
+  font-size: 1.16rem;
+  line-height: 1.15;
+}
+
+.source-load-dialog p {
+  min-height: 1.4em;
+  color: var(--success);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.source-load-progress {
+  height: 11px;
+  overflow: hidden;
+  border: 1px solid rgba(141, 189, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(2, 9, 19, 0.7);
+}
+
+.source-load-footer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.source-load-progress-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-load-spinner {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(141, 189, 255, 0.22);
+  border-top-color: var(--warm);
+  border-radius: 50%;
+  animation: source-load-spin 0.78s linear infinite;
+}
+
+@keyframes source-load-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.source-load-footer .button {
+  justify-self: end;
 }
 
 .gif-preprocess-dialog {
@@ -2143,8 +2215,13 @@ input:disabled {
     font-size: 0.62rem;
   }
 
+  .source-load-backdrop,
   .gif-preprocess-backdrop {
     padding: 10px;
+  }
+
+  .source-load-dialog {
+    padding: 14px;
   }
 
   .gif-preprocess-dialog {
