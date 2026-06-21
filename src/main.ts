@@ -26,6 +26,7 @@ type PreviewState = {
   resizeAspectLocked: boolean;
   fpsMode: FpsMode;
   fpsValue: number;
+  audioMode: AudioMode;
   thumbnailDataUrls: string[];
   thumbnailGenerationId: number;
   activeTrimEdge: TrimEdge | null;
@@ -37,6 +38,7 @@ type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
 type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 type ResizeMode = "original" | "custom";
 type FpsMode = "original" | "custom";
+type AudioMode = "keep" | "remove";
 type ExportFormat = "mp4" | "gif" | "png" | "jpeg" | "bmp";
 type ImageSequenceFormat = "png" | "jpeg" | "bmp";
 type ExportJobStatus = "idle" | "loading-ffmpeg" | "running" | "done" | "error";
@@ -153,6 +155,7 @@ type EditSettingsSnapshot = {
   resizeAspectLocked: boolean;
   fpsMode: FpsMode;
   fpsValue: number;
+  audioMode: AudioMode;
 };
 
 type AssignCheckpoint = {
@@ -427,6 +430,7 @@ const state: PreviewState = {
   resizeAspectLocked: true,
   fpsMode: "original",
   fpsValue: FPS_DEFAULT,
+  audioMode: "keep",
   thumbnailDataUrls: [],
   thumbnailGenerationId: 0,
   activeTrimEdge: null
@@ -775,13 +779,6 @@ root.innerHTML = `
                 />
               </label>
             </section>
-            <div class="control-tile audio-tile">
-              <div>
-                <h3>Audio</h3>
-                <p>Mode</p>
-              </div>
-              <span data-audio-summary>Keep</span>
-            </div>
           </div>
 
           <section class="export-strip" aria-labelledby="export-title">
@@ -1034,7 +1031,6 @@ const controlGrid = query<HTMLDivElement>(".control-grid");
 const fpsSummary = query<HTMLElement>("[data-fps-summary]");
 const fpsModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-fps-mode]"));
 const fpsValueInput = query<HTMLInputElement>("[data-fps-value]");
-const audioSummary = query<HTMLElement>("[data-audio-summary]");
 const exportStatus = query<HTMLElement>("[data-export-status]");
 const exportFormatSelect = query<HTMLSelectElement>("[data-export-format]");
 const exportAudioSelect = query<HTMLSelectElement>("[data-export-audio]");
@@ -1279,6 +1275,18 @@ exportFormatSelect.addEventListener("change", () => {
 
   renderExportUi();
 });
+
+exportAudioSelect.addEventListener("change", () => {
+  if (!isAudioModeEditable()) {
+    renderExportUi();
+    return;
+  }
+
+  state.audioMode = readAudioModeSelectValue();
+  invalidateExportOutput();
+  renderExportUi();
+});
+
 for (const button of exportTabButtons) {
   button.addEventListener("click", () => {
     const tab = button.dataset.exportTab;
@@ -1746,6 +1754,7 @@ function beginSourceLoad(
   state.resizeAspectLocked = true;
   state.fpsMode = "original";
   state.fpsValue = FPS_DEFAULT;
+  state.audioMode = "keep";
   state.thumbnailGenerationId += 1;
   const generationId = state.thumbnailGenerationId;
   pendingSettingsRestore = options.restoreSettings
@@ -2894,7 +2903,8 @@ function captureEditSettings(): EditSettingsSnapshot {
     resizeHeight: state.resizeHeight,
     resizeAspectLocked: state.resizeAspectLocked,
     fpsMode: state.fpsMode,
-    fpsValue: state.fpsValue
+    fpsValue: state.fpsValue,
+    audioMode: state.audioMode
   };
 }
 
@@ -2951,6 +2961,7 @@ function restoreEditSettings(settings: EditSettingsSnapshot): void {
   state.resizeAspectLocked = settings.resizeAspectLocked;
   state.fpsMode = isFpsEditable() ? settings.fpsMode : "original";
   state.fpsValue = clampFpsValue(settings.fpsValue);
+  state.audioMode = state.sourceKind === "video" ? settings.audioMode : "keep";
 }
 
 function handlePreviewLoadFailure(): void {
@@ -3220,7 +3231,6 @@ function isSingleFrameSource(): boolean {
 function renderSourceModeUi(): void {
   controlGrid.classList.toggle("is-hidden", state.sourceKind === "empty");
   renderFpsUi();
-  renderAudioSummary();
 }
 
 function isFpsEditable(): boolean {
@@ -3279,17 +3289,6 @@ function renderFpsUi(): void {
     button.setAttribute("aria-pressed", String(isSelected));
     button.disabled = !editable;
   }
-}
-
-function renderAudioSummary(): void {
-  const format = getCurrentExportFormat();
-
-  if (state.sourceKind === "video" && format === "mp4") {
-    audioSummary.textContent = isFpsSpeedChangeActive() ? "Time-stretch" : "Keep";
-    return;
-  }
-
-  audioSummary.textContent = "No audio";
 }
 
 function seekPreviewToTime(time: number): void {
@@ -5139,8 +5138,22 @@ function hasPendingEditSettings(): boolean {
 
   return (
     state.duration > 0 &&
-    (isTrimActive() || state.cropMode !== "full" || state.resizeMode !== "original" || isFpsSpeedChangeActive())
+    (
+      isTrimActive() ||
+      state.cropMode !== "full" ||
+      state.resizeMode !== "original" ||
+      isFpsSpeedChangeActive() ||
+      isAudioRemoveActive()
+    )
   );
+}
+
+function isAudioModeEditable(format = getCurrentExportFormat()): boolean {
+  return state.canPreviewDirectly && state.sourceKind === "video" && format === "mp4";
+}
+
+function isAudioRemoveActive(): boolean {
+  return state.sourceKind === "video" && state.audioMode === "remove";
 }
 
 async function confirmLargeGifConversion(commandPlan: ExportCommandPlan): Promise<boolean> {
@@ -5352,6 +5365,10 @@ function readExportFormatSelectValue(): ExportFormat {
   return isExportFormat(value) ? value : getCurrentExportFormat();
 }
 
+function readAudioModeSelectValue(): AudioMode {
+  return exportAudioSelect.value === "remove" ? "remove" : "keep";
+}
+
 function getCurrentExportFormat(): ExportFormat {
   const availableFormats = getAvailableExportFormats();
 
@@ -5530,10 +5547,15 @@ function buildVideoMp4ExportCommand(sourceFile: File): ExportCommandPlan {
     "-ss", formatFfmpegSeconds(state.trimStart),
     "-t", formatFfmpegSeconds(trimDuration),
     "-map", "0:v:0",
-    "-map", "0:a:0?",
     "-dn",
     "-sn"
   ];
+
+  if (state.audioMode === "keep") {
+    args.push("-map", "0:a:0?");
+  } else {
+    args.push("-an");
+  }
 
   if (filters.length > 0) {
     args.push("-vf", filters.join(","));
@@ -5543,12 +5565,14 @@ function buildVideoMp4ExportCommand(sourceFile: File): ExportCommandPlan {
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "23",
-    "-pix_fmt", "yuv420p",
-    "-c:a", "aac",
-    "-b:a", "128k",
-    "-movflags", "+faststart",
-    outputName
+    "-pix_fmt", "yuv420p"
   );
+
+  if (state.audioMode === "keep") {
+    args.push("-c:a", "aac", "-b:a", "128k");
+  }
+
+  args.push("-movflags", "+faststart", outputName);
 
   return {
     sourceKind: "video",
@@ -5598,7 +5622,7 @@ function buildVideoMp4SpeedChangeArgs(
     "-filter_complex"
   ];
 
-  if (probe.hasAudio) {
+  if (probe.hasAudio && state.audioMode === "keep") {
     const speedRatio = targetFps / probe.fps;
     const audioFilters = [
       `atrim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
@@ -5622,7 +5646,7 @@ function buildVideoMp4SpeedChangeArgs(
     "-pix_fmt", "yuv420p"
   );
 
-  if (probe.hasAudio) {
+  if (probe.hasAudio && state.audioMode === "keep") {
     args.push("-c:a", "aac", "-b:a", "128k");
   }
 
@@ -5884,10 +5908,8 @@ function renderExportUi(): void {
     dialogOpen ||
     !state.canPreviewDirectly ||
     availableFormats.length <= 1;
-  exportAudioSelect.options[0].textContent =
-    state.sourceKind === "video" && currentFormat === "mp4"
-      ? isFpsSpeedChangeActive() ? "Time-stretch audio" : "Keep audio"
-      : "No audio";
+  renderExportAudioOptions(currentFormat);
+  exportAudioSelect.disabled = busy || dialogOpen || !isAudioModeEditable(currentFormat);
   assignButton.disabled = !canAssign;
   assignResetButton.disabled = !canResetAssign;
   exportButton.disabled = !canExport;
@@ -5924,7 +5946,6 @@ function renderExportUi(): void {
   }
 
   renderExportLog();
-  renderAudioSummary();
 }
 
 function renderExportFormatOptions(availableFormats: ExportFormat[], currentFormat: ExportFormat): void {
@@ -5946,6 +5967,33 @@ function renderExportFormatOptions(availableFormats: ExportFormat[], currentForm
       return option;
     })
   );
+}
+
+function renderExportAudioOptions(currentFormat: ExportFormat): void {
+  const editable = isAudioModeEditable(currentFormat);
+  const options = editable
+    ? [
+        { value: "keep", label: "Keep audio" },
+        { value: "remove", label: "Remove audio" }
+      ]
+    : [{ value: "none", label: "No audio" }];
+  const nextOptionSignature = options.map((option) => `${option.value}:${option.label}`).join(",");
+  const currentOptionSignature = Array.from(exportAudioSelect.options)
+    .map((option) => `${option.value}:${option.textContent ?? ""}`)
+    .join(",");
+
+  if (currentOptionSignature !== nextOptionSignature) {
+    exportAudioSelect.replaceChildren(
+      ...options.map((option) => {
+        const element = document.createElement("option");
+        element.value = option.value;
+        element.textContent = option.label;
+        return element;
+      })
+    );
+  }
+
+  exportAudioSelect.value = editable ? state.audioMode : "none";
 }
 
 function renderExportLog(): void {
@@ -6555,6 +6603,7 @@ function resetSource(): void {
   state.resizeAspectLocked = true;
   state.fpsMode = "original";
   state.fpsValue = FPS_DEFAULT;
+  state.audioMode = "keep";
   state.thumbnailGenerationId += 1;
 
   fileInput.value = "";

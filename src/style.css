@@ -699,7 +699,7 @@ input:disabled {
 
 .control-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -2145,7 +2145,9 @@ input:disabled {
   }
 
   .control-grid {
-    display: none;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
   }
 
   .trim-panel,
