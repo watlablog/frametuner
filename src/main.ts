@@ -56,6 +56,22 @@ type GifDecodeResult = {
   duration: number;
 };
 
+type GifPreprocessDialogState = {
+  file: File | null;
+  originalFrames: GifFrame[];
+  deletedFrameIndexes: Set<number>;
+  selectedFrameIndexes: Set<number>;
+  width: number;
+  height: number;
+  duration: number;
+  generationId: number;
+  activeFrameIndex: number | null;
+  lastClickedFrameIndex: number | null;
+  resolve: ((result: GifDecodeResult | null) => void) | null;
+  previousFocus: HTMLElement | null;
+  errorMessage: string;
+};
+
 type ImageDecoderConstructor = new (init: {
   data: BufferSource;
   type: string;
@@ -138,6 +154,7 @@ type AssignCheckpoint = {
   sourceFile: File;
   settings: EditSettingsSnapshot;
   format: ExportFormat;
+  gifSnapshot?: GifDecodeResult;
 };
 
 type PendingSettingsRestore = {
@@ -150,6 +167,7 @@ type LoadSourceOptions = {
   clearAssignCheckpoint?: boolean;
   restoreSettings?: EditSettingsSnapshot;
   restoreFormat?: ExportFormat;
+  skipGifPreprocess?: boolean;
 };
 
 type GifExportSizeEstimate = {
@@ -742,6 +760,74 @@ root.innerHTML = `
     </main>
   </div>
 
+  <div class="gif-preprocess-backdrop" data-gif-preprocess-dialog aria-hidden="true" hidden>
+    <section
+      class="gif-preprocess-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="gif-preprocess-title"
+      aria-describedby="gif-preprocess-description"
+    >
+      <div class="gif-preprocess-heading">
+        <div>
+          <span class="section-kicker">GIF only</span>
+          <h2 id="gif-preprocess-title">GIF frame preprocessing</h2>
+          <p id="gif-preprocess-description">
+            Select frames to remove before loading this GIF into FrameTuner.
+          </p>
+        </div>
+        <span class="status-pill status-pill-muted" data-gif-preprocess-count>0 frames</span>
+      </div>
+
+      <div class="gif-preprocess-toolbar">
+        <label>
+          <span>Skip count</span>
+          <input
+            type="number"
+            min="1"
+            value="1"
+            step="1"
+            inputmode="numeric"
+            data-gif-skip-count
+          />
+        </label>
+        <button class="button" type="button" data-gif-select-skipped>Select skipped</button>
+        <button class="button" type="button" data-gif-clear-selection>Clear selection</button>
+      </div>
+
+      <div class="gif-preprocess-status">
+        <span data-gif-preprocess-summary>Selected 0 / Remaining 0</span>
+        <strong data-gif-preprocess-error></strong>
+      </div>
+
+      <div class="gif-frame-browser">
+        <div
+          class="gif-frame-grid"
+          role="listbox"
+          aria-label="GIF frames"
+          aria-multiselectable="true"
+          tabindex="0"
+          data-gif-frame-grid
+        ></div>
+
+        <div class="gif-frame-preview-panel" aria-label="Selected frame preview">
+          <canvas class="gif-frame-preview-canvas" data-gif-frame-preview-canvas></canvas>
+          <div class="gif-frame-preview-meta">
+            <span>Frame <strong data-gif-frame-preview-number>0001</strong></span>
+            <span data-gif-frame-preview-duration>0.0s</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="gif-preprocess-actions">
+        <button class="button danger" type="button" data-gif-delete-selected>Delete selected</button>
+        <button class="button" type="button" data-gif-restore-all>Restore all</button>
+        <button class="button" type="button" data-gif-preprocess-cancel>Cancel</button>
+        <button class="button primary" type="button" data-gif-preprocess-apply>Apply</button>
+      </div>
+    </section>
+  </div>
+
   <div class="export-warning-backdrop" data-export-warning-dialog aria-hidden="true" hidden>
     <section
       class="export-warning-dialog"
@@ -834,6 +920,22 @@ const exportProgress = query<HTMLElement>("[data-export-progress]");
 const exportLog = query<HTMLPreElement>("[data-export-log]");
 const exportTabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-export-tab]"));
 const exportTabPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-export-panel]"));
+const gifPreprocessDialog = query<HTMLDivElement>("[data-gif-preprocess-dialog]");
+const gifPreprocessCount = query<HTMLElement>("[data-gif-preprocess-count]");
+const gifSkipCountInput = query<HTMLInputElement>("[data-gif-skip-count]");
+const gifSelectSkippedButton = query<HTMLButtonElement>("[data-gif-select-skipped]");
+const gifClearSelectionButton = query<HTMLButtonElement>("[data-gif-clear-selection]");
+const gifPreprocessSummary = query<HTMLElement>("[data-gif-preprocess-summary]");
+const gifPreprocessError = query<HTMLElement>("[data-gif-preprocess-error]");
+const gifFrameGrid = query<HTMLDivElement>("[data-gif-frame-grid]");
+const gifFramePreviewCanvas = query<HTMLCanvasElement>("[data-gif-frame-preview-canvas]");
+const gifFramePreviewContext = gifFramePreviewCanvas.getContext("2d");
+const gifFramePreviewNumber = query<HTMLElement>("[data-gif-frame-preview-number]");
+const gifFramePreviewDuration = query<HTMLElement>("[data-gif-frame-preview-duration]");
+const gifDeleteSelectedButton = query<HTMLButtonElement>("[data-gif-delete-selected]");
+const gifRestoreAllButton = query<HTMLButtonElement>("[data-gif-restore-all]");
+const gifPreprocessCancelButton = query<HTMLButtonElement>("[data-gif-preprocess-cancel]");
+const gifPreprocessApplyButton = query<HTMLButtonElement>("[data-gif-preprocess-apply]");
 const exportWarningDialog = query<HTMLDivElement>("[data-export-warning-dialog]");
 const exportWarningSize = query<HTMLElement>("[data-export-warning-size]");
 const exportWarningCancelButton = query<HTMLButtonElement>("[data-export-warning-cancel]");
@@ -850,9 +952,25 @@ let ffmpegInstance: FFmpeg | null = null;
 let ffmpegLoadPromise: Promise<FFmpeg> | null = null;
 let latestFfmpegLog = "";
 let activeExportTab: "settings" | "log" = "settings";
+let gifPreprocessGenerationId = 0;
 let exportWarningDialogResolve: ((confirmed: boolean) => void) | null = null;
 let exportWarningPreviousFocus: HTMLElement | null = null;
 let exportResultPreviousFocus: HTMLElement | null = null;
+const gifPreprocessState: GifPreprocessDialogState = {
+  file: null,
+  originalFrames: [],
+  deletedFrameIndexes: new Set<number>(),
+  selectedFrameIndexes: new Set<number>(),
+  width: 0,
+  height: 0,
+  duration: 0,
+  generationId: 0,
+  activeFrameIndex: null,
+  lastClickedFrameIndex: null,
+  resolve: null,
+  previousFocus: null,
+  errorMessage: ""
+};
 
 chooseFileButton.addEventListener("click", () => fileInput.click());
 
@@ -1017,6 +1135,22 @@ for (const button of exportTabButtons) {
     }
   });
 }
+gifSelectSkippedButton.addEventListener("click", selectSkippedGifFrames);
+gifClearSelectionButton.addEventListener("click", clearGifFrameSelection);
+gifDeleteSelectedButton.addEventListener("click", deleteSelectedGifFrames);
+gifRestoreAllButton.addEventListener("click", restoreAllGifFrames);
+gifPreprocessCancelButton.addEventListener("click", () => {
+  closeGifPreprocessDialog(null);
+});
+gifPreprocessApplyButton.addEventListener("click", applyGifPreprocessDialog);
+gifFrameGrid.addEventListener("click", handleGifFrameGridClick);
+gifFrameGrid.addEventListener("keydown", handleGifFrameGridKeydown);
+gifPreprocessDialog.addEventListener("click", (event) => {
+  if (event.target === gifPreprocessDialog) {
+    closeGifPreprocessDialog(null);
+  }
+});
+gifPreprocessDialog.addEventListener("keydown", handleGifPreprocessDialogKeydown);
 assignButton.addEventListener("click", () => {
   void assignCurrentSource();
 });
@@ -1104,10 +1238,27 @@ function getStaticImageFormat(file: File): ExportFormat | null {
 }
 
 function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
+  const isGif = isGifFile(file);
+
+  if (isGif && !options.skipGifPreprocess) {
+    void loadGifSourceWithPreprocess(file, options);
+    return;
+  }
+
+  beginSourceLoad(file, options);
+}
+
+function beginSourceLoad(
+  file: File,
+  options: LoadSourceOptions = {},
+  decodedGif: GifDecodeResult | null = null,
+  forceGifSource = false
+): void {
   if (options.clearAssignCheckpoint !== false) {
     assignCheckpoint = null;
   }
 
+  gifPreprocessGenerationId += 1;
   revokeSourceUrl();
   resetExportState();
   stopGifPlayback();
@@ -1165,7 +1316,11 @@ function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
   renderExportUi();
 
   if (isGif) {
-    void loadGifSource(file, generationId);
+    if (decodedGif) {
+      initializeLoadedGif(file, decodedGif, generationId, forceGifSource);
+    } else {
+      void loadGifSource(file, generationId);
+    }
     return;
   }
 
@@ -1179,53 +1334,600 @@ function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
   video.load();
 }
 
+async function loadGifSourceWithPreprocess(file: File, options: LoadSourceOptions): Promise<void> {
+  const generationId = gifPreprocessGenerationId + 1;
+  gifPreprocessGenerationId = generationId;
+
+  try {
+    const decodedGif = await decodeGifFrames(file, () => gifPreprocessGenerationId === generationId);
+
+    if (!decodedGif || gifPreprocessGenerationId !== generationId) {
+      return;
+    }
+
+    if (decodedGif.frames.length === 1) {
+      beginSourceLoad(file, options, decodedGif);
+      return;
+    }
+
+    const processedGif = await showGifPreprocessDialog(file, decodedGif, generationId);
+
+    if (!processedGif || gifPreprocessGenerationId !== generationId) {
+      fileInput.value = "";
+      return;
+    }
+
+    beginSourceLoad(file, options, processedGif, true);
+  } catch {
+    if (gifPreprocessGenerationId === generationId && !state.sourceFile) {
+      handlePreviewLoadFailure();
+    }
+  }
+}
+
+function showGifPreprocessDialog(
+  file: File,
+  decodedGif: GifDecodeResult,
+  generationId: number
+): Promise<GifDecodeResult | null> {
+  if (gifPreprocessState.resolve) {
+    closeGifPreprocessDialog(null);
+  }
+
+  gifPreprocessState.file = file;
+  gifPreprocessState.originalFrames = decodedGif.frames;
+  gifPreprocessState.deletedFrameIndexes = new Set<number>();
+  gifPreprocessState.selectedFrameIndexes = new Set<number>();
+  gifPreprocessState.width = decodedGif.width;
+  gifPreprocessState.height = decodedGif.height;
+  gifPreprocessState.duration = decodedGif.duration;
+  gifPreprocessState.generationId = generationId;
+  gifPreprocessState.activeFrameIndex = 0;
+  gifPreprocessState.lastClickedFrameIndex = 0;
+  gifPreprocessState.previousFocus =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  gifPreprocessState.errorMessage = "";
+  gifSkipCountInput.value = "1";
+  gifPreprocessDialog.hidden = false;
+  gifPreprocessDialog.setAttribute("aria-hidden", "false");
+
+  return new Promise((resolve) => {
+    gifPreprocessState.resolve = resolve;
+    renderGifPreprocessDialog();
+    gifPreprocessCancelButton.focus();
+  });
+}
+
+function closeGifPreprocessDialog(result: GifDecodeResult | null): void {
+  const resolve = gifPreprocessState.resolve;
+
+  if (!resolve) {
+    return;
+  }
+
+  gifPreprocessDialog.hidden = true;
+  gifPreprocessDialog.setAttribute("aria-hidden", "true");
+  gifPreprocessState.resolve = null;
+  gifPreprocessState.file = null;
+  gifPreprocessState.originalFrames = [];
+  gifPreprocessState.deletedFrameIndexes = new Set<number>();
+  gifPreprocessState.selectedFrameIndexes = new Set<number>();
+  gifPreprocessState.activeFrameIndex = null;
+  gifPreprocessState.lastClickedFrameIndex = null;
+  gifPreprocessState.errorMessage = "";
+  resolve(result);
+
+  if (gifPreprocessState.previousFocus && document.contains(gifPreprocessState.previousFocus)) {
+    gifPreprocessState.previousFocus.focus();
+  }
+
+  gifPreprocessState.previousFocus = null;
+}
+
+function renderGifPreprocessDialog(): void {
+  const workingFrames = getGifPreprocessWorkingFrames();
+  normalizeGifPreprocessSelection();
+  const remainingCount = workingFrames.length;
+  const selectedCount = countSelectedWorkingGifFrames();
+  const activeFrame = getActiveGifPreprocessFrame();
+
+  gifPreprocessCount.textContent =
+    `${remainingCount} / ${gifPreprocessState.originalFrames.length} frames`;
+  gifPreprocessSummary.textContent = `Selected ${selectedCount} / Remaining ${remainingCount}`;
+  gifPreprocessError.textContent = gifPreprocessState.errorMessage;
+  gifDeleteSelectedButton.disabled = selectedCount === 0;
+  gifClearSelectionButton.disabled = selectedCount <= 1;
+  gifRestoreAllButton.disabled = gifPreprocessState.deletedFrameIndexes.size === 0;
+  gifPreprocessApplyButton.disabled = remainingCount === 0;
+
+  if (activeFrame && gifFramePreviewContext) {
+    gifFramePreviewCanvas.width = 480;
+    gifFramePreviewCanvas.height = 270;
+    drawContainedFrame(
+      gifFramePreviewContext,
+      activeFrame.frame.canvas,
+      gifPreprocessState.width,
+      gifPreprocessState.height,
+      gifFramePreviewCanvas.width,
+      gifFramePreviewCanvas.height
+    );
+    gifFramePreviewNumber.textContent = formatGifFrameListNumber(activeFrame.originalIndex);
+    gifFramePreviewDuration.textContent = `${formatSecondsInput(activeFrame.frame.duration)}s`;
+  } else if (gifFramePreviewContext) {
+    gifFramePreviewContext.clearRect(0, 0, gifFramePreviewCanvas.width, gifFramePreviewCanvas.height);
+    gifFramePreviewNumber.textContent = "----";
+    gifFramePreviewDuration.textContent = "0.0s";
+  }
+
+  const frameButtons = workingFrames.map(({ frame, originalIndex }) => {
+    const button = document.createElement("button");
+    const frameNumber = document.createElement("span");
+    const frameDuration = document.createElement("span");
+    const selected = gifPreprocessState.selectedFrameIndexes.has(originalIndex);
+    const active = gifPreprocessState.activeFrameIndex === originalIndex;
+
+    button.className = "gif-frame-row";
+    button.type = "button";
+    button.dataset.gifFrameIndex = String(originalIndex);
+    button.id = `gif-frame-option-${originalIndex}`;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(selected));
+    button.classList.toggle("is-selected", selected);
+    button.classList.toggle("is-active", active);
+
+    frameNumber.textContent = formatGifFrameListNumber(originalIndex);
+    frameDuration.textContent = `${formatSecondsInput(frame.duration)}s`;
+    frameNumber.className = "gif-frame-number";
+    frameDuration.className = "gif-frame-duration";
+
+    button.append(frameNumber, frameDuration);
+    return button;
+  });
+
+  gifFrameGrid.replaceChildren(...frameButtons);
+
+  if (gifPreprocessState.activeFrameIndex !== null) {
+    gifFrameGrid.setAttribute("aria-activedescendant", `gif-frame-option-${gifPreprocessState.activeFrameIndex}`);
+    requestAnimationFrame(() => {
+      const activeButton = gifFrameGrid.querySelector<HTMLButtonElement>(".gif-frame-row.is-active");
+
+      if (activeButton) {
+        activeButton.scrollIntoView({ block: "nearest" });
+      }
+    });
+  } else {
+    gifFrameGrid.removeAttribute("aria-activedescendant");
+  }
+}
+
+function getGifPreprocessWorkingFrames(): Array<{ frame: GifFrame; originalIndex: number }> {
+  return gifPreprocessState.originalFrames
+    .map((frame, originalIndex) => ({ frame, originalIndex }))
+    .filter(({ originalIndex }) => !gifPreprocessState.deletedFrameIndexes.has(originalIndex));
+}
+
+function getActiveGifPreprocessFrame(): { frame: GifFrame; originalIndex: number } | null {
+  const activeIndex = gifPreprocessState.activeFrameIndex;
+
+  if (activeIndex === null || gifPreprocessState.deletedFrameIndexes.has(activeIndex)) {
+    return null;
+  }
+
+  const frame = gifPreprocessState.originalFrames[activeIndex];
+  return frame ? { frame, originalIndex: activeIndex } : null;
+}
+
+function normalizeGifPreprocessSelection(): void {
+  const workingIndexes = getGifPreprocessWorkingFrames().map(({ originalIndex }) => originalIndex);
+
+  if (workingIndexes.length === 0) {
+    gifPreprocessState.activeFrameIndex = null;
+    gifPreprocessState.selectedFrameIndexes = new Set<number>();
+    gifPreprocessState.lastClickedFrameIndex = null;
+    return;
+  }
+
+  if (
+    gifPreprocessState.activeFrameIndex === null ||
+    !workingIndexes.includes(gifPreprocessState.activeFrameIndex)
+  ) {
+    gifPreprocessState.activeFrameIndex = workingIndexes[0];
+  }
+
+  const workingIndexSet = new Set(workingIndexes);
+  gifPreprocessState.selectedFrameIndexes = new Set(
+    Array.from(gifPreprocessState.selectedFrameIndexes).filter((index) => workingIndexSet.has(index))
+  );
+
+  if (gifPreprocessState.selectedFrameIndexes.size === 0) {
+    gifPreprocessState.selectedFrameIndexes.add(gifPreprocessState.activeFrameIndex);
+  }
+
+  if (
+    gifPreprocessState.lastClickedFrameIndex === null ||
+    !workingIndexes.includes(gifPreprocessState.lastClickedFrameIndex)
+  ) {
+    gifPreprocessState.lastClickedFrameIndex = gifPreprocessState.activeFrameIndex;
+  }
+}
+
+function formatGifFrameListNumber(frameIndex: number): string {
+  return String(frameIndex + 1).padStart(4, "0");
+}
+
+function countSelectedWorkingGifFrames(): number {
+  const workingIndexes = new Set(
+    getGifPreprocessWorkingFrames().map(({ originalIndex }) => originalIndex)
+  );
+  let count = 0;
+
+  for (const selectedIndex of gifPreprocessState.selectedFrameIndexes) {
+    if (workingIndexes.has(selectedIndex)) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+function handleGifFrameGridClick(event: MouseEvent): void {
+  const button = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>(
+    "[data-gif-frame-index]"
+  );
+
+  if (!button) {
+    return;
+  }
+
+  const frameIndex = Number(button.dataset.gifFrameIndex);
+
+  if (!Number.isInteger(frameIndex)) {
+    return;
+  }
+
+  gifPreprocessState.errorMessage = "";
+
+  if (event.shiftKey && gifPreprocessState.lastClickedFrameIndex !== null) {
+    replaceGifFrameSelectionWithRange(gifPreprocessState.lastClickedFrameIndex, frameIndex);
+  } else if (event.metaKey || event.ctrlKey) {
+    if (gifPreprocessState.selectedFrameIndexes.has(frameIndex)) {
+      gifPreprocessState.selectedFrameIndexes.delete(frameIndex);
+    } else {
+      gifPreprocessState.selectedFrameIndexes.add(frameIndex);
+    }
+
+    if (gifPreprocessState.selectedFrameIndexes.size === 0) {
+      gifPreprocessState.selectedFrameIndexes.add(frameIndex);
+    }
+    gifPreprocessState.lastClickedFrameIndex = frameIndex;
+  } else {
+    gifPreprocessState.selectedFrameIndexes = new Set<number>([frameIndex]);
+    gifPreprocessState.lastClickedFrameIndex = frameIndex;
+  }
+
+  gifPreprocessState.activeFrameIndex = frameIndex;
+  renderGifPreprocessDialog();
+  gifFrameGrid.focus({ preventScroll: true });
+}
+
+function replaceGifFrameSelectionWithRange(startFrameIndex: number, endFrameIndex: number): void {
+  const workingIndexes = getGifPreprocessWorkingFrames().map(({ originalIndex }) => originalIndex);
+  const startPosition = workingIndexes.indexOf(startFrameIndex);
+  const endPosition = workingIndexes.indexOf(endFrameIndex);
+
+  if (startPosition === -1 || endPosition === -1) {
+    gifPreprocessState.selectedFrameIndexes = new Set<number>([endFrameIndex]);
+    return;
+  }
+
+  const rangeStart = Math.min(startPosition, endPosition);
+  const rangeEnd = Math.max(startPosition, endPosition);
+  const nextSelection = new Set<number>();
+
+  for (let position = rangeStart; position <= rangeEnd; position += 1) {
+    nextSelection.add(workingIndexes[position]);
+  }
+
+  gifPreprocessState.selectedFrameIndexes = nextSelection;
+}
+
+function handleGifFrameGridKeydown(event: KeyboardEvent): void {
+  const workingIndexes = getGifPreprocessWorkingFrames().map(({ originalIndex }) => originalIndex);
+
+  if (workingIndexes.length === 0) {
+    return;
+  }
+
+  const activeIndex = gifPreprocessState.activeFrameIndex ?? workingIndexes[0];
+  const activePosition = Math.max(0, workingIndexes.indexOf(activeIndex));
+  let nextPosition = activePosition;
+
+  if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+    nextPosition = Math.min(workingIndexes.length - 1, activePosition + 1);
+  } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+    nextPosition = Math.max(0, activePosition - 1);
+  } else if (event.key === "Home") {
+    nextPosition = 0;
+  } else if (event.key === "End") {
+    nextPosition = workingIndexes.length - 1;
+  } else if (event.key === "Delete" || event.key === "Backspace") {
+    event.preventDefault();
+    deleteSelectedGifFrames();
+    return;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+
+  const nextFrameIndex = workingIndexes[nextPosition];
+  gifPreprocessState.errorMessage = "";
+  gifPreprocessState.activeFrameIndex = nextFrameIndex;
+
+  if (event.shiftKey && gifPreprocessState.lastClickedFrameIndex !== null) {
+    replaceGifFrameSelectionWithRange(gifPreprocessState.lastClickedFrameIndex, nextFrameIndex);
+  } else {
+    gifPreprocessState.selectedFrameIndexes = new Set<number>([nextFrameIndex]);
+    gifPreprocessState.lastClickedFrameIndex = nextFrameIndex;
+  }
+
+  renderGifPreprocessDialog();
+}
+
+function selectSkippedGifFrames(): void {
+  const skipCount = clamp(Math.floor(Number(gifSkipCountInput.value)), 1, 999);
+  const workingFrames = getGifPreprocessWorkingFrames();
+
+  gifSkipCountInput.value = String(skipCount);
+  gifPreprocessState.selectedFrameIndexes = new Set<number>();
+  gifPreprocessState.errorMessage = "";
+
+  for (let position = 0; position < workingFrames.length; position += skipCount + 1) {
+    for (let offset = 1; offset <= skipCount; offset += 1) {
+      const frame = workingFrames[position + offset];
+
+      if (frame) {
+        gifPreprocessState.selectedFrameIndexes.add(frame.originalIndex);
+      }
+    }
+  }
+
+  const [firstSelectedIndex] = gifPreprocessState.selectedFrameIndexes;
+  if (firstSelectedIndex !== undefined) {
+    gifPreprocessState.activeFrameIndex = firstSelectedIndex;
+    gifPreprocessState.lastClickedFrameIndex = firstSelectedIndex;
+  } else if (workingFrames[0]) {
+    gifPreprocessState.activeFrameIndex = workingFrames[0].originalIndex;
+    gifPreprocessState.selectedFrameIndexes = new Set<number>([workingFrames[0].originalIndex]);
+    gifPreprocessState.lastClickedFrameIndex = workingFrames[0].originalIndex;
+  }
+
+  renderGifPreprocessDialog();
+  gifFrameGrid.focus({ preventScroll: true });
+}
+
+function clearGifFrameSelection(): void {
+  const activeFrameIndex =
+    gifPreprocessState.activeFrameIndex ?? getGifPreprocessWorkingFrames()[0]?.originalIndex ?? null;
+  gifPreprocessState.selectedFrameIndexes =
+    activeFrameIndex === null ? new Set<number>() : new Set<number>([activeFrameIndex]);
+  gifPreprocessState.lastClickedFrameIndex = activeFrameIndex;
+  gifPreprocessState.errorMessage = "";
+  renderGifPreprocessDialog();
+  gifFrameGrid.focus({ preventScroll: true });
+}
+
+function deleteSelectedGifFrames(): void {
+  const nextDeletedIndexes = new Set(gifPreprocessState.deletedFrameIndexes);
+  const workingFramesBefore = getGifPreprocessWorkingFrames();
+  const activePositionBefore = Math.max(
+    0,
+    workingFramesBefore.findIndex(
+      ({ originalIndex }) => originalIndex === gifPreprocessState.activeFrameIndex
+    )
+  );
+
+  for (const selectedIndex of gifPreprocessState.selectedFrameIndexes) {
+    nextDeletedIndexes.add(selectedIndex);
+  }
+
+  if (nextDeletedIndexes.size >= gifPreprocessState.originalFrames.length) {
+    gifPreprocessState.errorMessage = "At least one frame is required.";
+    renderGifPreprocessDialog();
+    return;
+  }
+
+  gifPreprocessState.deletedFrameIndexes = nextDeletedIndexes;
+  const workingFramesAfter = getGifPreprocessWorkingFrames();
+  const nextActiveFrame =
+    workingFramesAfter[Math.min(activePositionBefore, workingFramesAfter.length - 1)] ?? null;
+  gifPreprocessState.activeFrameIndex = nextActiveFrame?.originalIndex ?? null;
+  gifPreprocessState.selectedFrameIndexes =
+    nextActiveFrame === null ? new Set<number>() : new Set<number>([nextActiveFrame.originalIndex]);
+  gifPreprocessState.lastClickedFrameIndex = gifPreprocessState.activeFrameIndex;
+  gifPreprocessState.errorMessage = "";
+  renderGifPreprocessDialog();
+  gifFrameGrid.focus({ preventScroll: true });
+}
+
+function restoreAllGifFrames(): void {
+  gifPreprocessState.deletedFrameIndexes = new Set<number>();
+  const activeFrameIndex = gifPreprocessState.activeFrameIndex ?? 0;
+  gifPreprocessState.activeFrameIndex = activeFrameIndex;
+  gifPreprocessState.selectedFrameIndexes = new Set<number>([activeFrameIndex]);
+  gifPreprocessState.lastClickedFrameIndex = activeFrameIndex;
+  gifPreprocessState.errorMessage = "";
+  renderGifPreprocessDialog();
+  gifFrameGrid.focus({ preventScroll: true });
+}
+
+function applyGifPreprocessDialog(): void {
+  const frames = buildPreprocessedGifFrames(
+    gifPreprocessState.originalFrames,
+    gifPreprocessState.deletedFrameIndexes
+  );
+
+  if (frames.length === 0) {
+    gifPreprocessState.errorMessage = "At least one frame is required.";
+    renderGifPreprocessDialog();
+    return;
+  }
+
+  closeGifPreprocessDialog({
+    frames,
+    width: gifPreprocessState.width,
+    height: gifPreprocessState.height,
+    duration: roundTime(frames.reduce((total, frame) => total + frame.duration, 0))
+  });
+}
+
+function buildPreprocessedGifFrames(
+  originalFrames: GifFrame[],
+  deletedFrameIndexes: Set<number>
+): GifFrame[] {
+  const frames: GifFrame[] = [];
+  let leadingDeletedDuration = 0;
+
+  for (let index = 0; index < originalFrames.length; index += 1) {
+    const frame = originalFrames[index];
+
+    if (deletedFrameIndexes.has(index)) {
+      if (frames.length > 0) {
+        const previousFrame = frames[frames.length - 1];
+        previousFrame.duration = roundTime(previousFrame.duration + frame.duration);
+      } else {
+        leadingDeletedDuration += frame.duration;
+      }
+      continue;
+    }
+
+    frames.push({
+      canvas: frame.canvas,
+      startTime: 0,
+      duration: roundTime(frame.duration + leadingDeletedDuration)
+    });
+    leadingDeletedDuration = 0;
+  }
+
+  const expectedDuration = roundTime(
+    originalFrames.reduce((total, frame) => total + frame.duration, 0)
+  );
+  const currentDuration = roundTime(frames.reduce((total, frame) => total + frame.duration, 0));
+  const durationDelta = roundTime(expectedDuration - currentDuration);
+
+  if (frames.length > 0 && Math.abs(durationDelta) > 0.0001) {
+    const lastFrame = frames[frames.length - 1];
+    lastFrame.duration = Math.max(0.02, roundTime(lastFrame.duration + durationDelta));
+  }
+
+  let startTime = 0;
+
+  return frames.map((frame) => {
+    const nextFrame = {
+      ...frame,
+      startTime: roundTime(startTime)
+    };
+    startTime += frame.duration;
+    return nextFrame;
+  });
+}
+
+function handleGifPreprocessDialogKeydown(event: KeyboardEvent): void {
+  if (!gifPreprocessState.resolve) {
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeGifPreprocessDialog(null);
+    return;
+  }
+
+  if (event.key !== "Tab") {
+    return;
+  }
+
+  const focusableElements = Array.from(
+    gifPreprocessDialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hasAttribute("hidden"));
+
+  if (focusableElements.length === 0) {
+    return;
+  }
+
+  const currentIndex = focusableElements.indexOf(document.activeElement as HTMLElement);
+  const direction = event.shiftKey ? -1 : 1;
+  const nextIndex =
+    currentIndex === -1
+      ? 0
+      : (currentIndex + direction + focusableElements.length) % focusableElements.length;
+
+  event.preventDefault();
+  focusableElements[nextIndex].focus();
+}
+
 async function loadGifSource(file: File, generationId: number): Promise<void> {
   try {
-    const decodedGif = await decodeGifFrames(file, generationId);
+    const decodedGif = await decodeGifFrames(file, () => isCurrentSourceGeneration(file, generationId));
 
     if (!decodedGif || !isCurrentSourceGeneration(file, generationId)) {
       return;
     }
 
-    if (decodedGif.frames.length === 1) {
-      state.sourceKind = "image";
-      initializeLoadedStaticFrame(
-        decodedGif.frames[0].canvas,
-        decodedGif.width,
-        decodedGif.height,
-        generationId
-      );
-      return;
-    }
-
-    state.gifFrames = decodedGif.frames;
-    state.gifCurrentFrameIndex = 0;
-    state.gifCurrentTime = 0;
-    state.duration = decodedGif.duration;
-    state.width = decodedGif.width;
-    state.height = decodedGif.height;
-    state.canPreviewDirectly = true;
-    state.trimStart = 0;
-    state.trimEnd = state.duration;
-    state.cropMode = "full";
-    state.cropRect = { ...DEFAULT_CROP_RECT };
-    state.freeCropSizeLocked = false;
-    state.resizeMode = "original";
-    state.resizeWidth = state.width;
-    state.resizeHeight = state.height;
-    state.resizeAspectLocked = true;
-    applyPendingSettingsRestore(generationId);
-
-    gifCanvas.width = state.width;
-    gifCanvas.height = state.height;
-    setGifCurrentTime(state.trimStart);
-    renderLoadedState();
-    void generateTrimThumbnails();
+    initializeLoadedGif(file, decodedGif, generationId);
   } catch {
     if (isCurrentSourceGeneration(file, generationId)) {
       handlePreviewLoadFailure();
     }
   }
+}
+
+function initializeLoadedGif(
+  file: File,
+  decodedGif: GifDecodeResult,
+  generationId: number,
+  forceGifSource = false
+): void {
+  if (!isCurrentSourceGeneration(file, generationId)) {
+    return;
+  }
+
+  if (decodedGif.frames.length === 1 && !forceGifSource) {
+    state.sourceKind = "image";
+    initializeLoadedStaticFrame(
+      decodedGif.frames[0].canvas,
+      decodedGif.width,
+      decodedGif.height,
+      generationId
+    );
+    return;
+  }
+
+  state.gifFrames = decodedGif.frames;
+  state.gifCurrentFrameIndex = 0;
+  state.gifCurrentTime = 0;
+  state.duration = decodedGif.duration;
+  state.width = decodedGif.width;
+  state.height = decodedGif.height;
+  state.canPreviewDirectly = true;
+  state.trimStart = 0;
+  state.trimEnd = state.duration;
+  state.cropMode = "full";
+  state.cropRect = { ...DEFAULT_CROP_RECT };
+  state.freeCropSizeLocked = false;
+  state.resizeMode = "original";
+  state.resizeWidth = state.width;
+  state.resizeHeight = state.height;
+  state.resizeAspectLocked = true;
+  applyPendingSettingsRestore(generationId);
+
+  gifCanvas.width = state.width;
+  gifCanvas.height = state.height;
+  setGifCurrentTime(state.trimStart);
+  renderLoadedState();
+  void generateTrimThumbnails();
 }
 
 async function loadStaticImageSource(file: File, generationId: number): Promise<void> {
@@ -1350,6 +2052,19 @@ function captureEditSettings(): EditSettingsSnapshot {
   };
 }
 
+function captureGifSnapshot(): GifDecodeResult {
+  return {
+    frames: state.gifFrames.map((frame) => ({
+      canvas: frame.canvas,
+      startTime: frame.startTime,
+      duration: frame.duration
+    })),
+    width: state.width,
+    height: state.height,
+    duration: state.duration
+  };
+}
+
 function applyPendingSettingsRestore(generationId: number): void {
   if (!pendingSettingsRestore || pendingSettingsRestore.generationId !== generationId) {
     return;
@@ -1440,7 +2155,10 @@ function renderLoadedState(): void {
   updatePlaybackUi();
 }
 
-async function decodeGifFrames(file: File, generationId: number): Promise<GifDecodeResult | null> {
+async function decodeGifFrames(
+  file: File,
+  isCurrentGeneration: () => boolean
+): Promise<GifDecodeResult | null> {
   const ImageDecoder = getImageDecoderConstructor();
 
   if (!ImageDecoder) {
@@ -1455,7 +2173,7 @@ async function decodeGifFrames(file: File, generationId: number): Promise<GifDec
   try {
     await decoder.tracks.ready;
 
-    if (!isCurrentSourceGeneration(file, generationId)) {
+    if (!isCurrentGeneration()) {
       return null;
     }
 
@@ -1466,7 +2184,7 @@ async function decodeGifFrames(file: File, generationId: number): Promise<GifDec
     let startTime = 0;
 
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
-      if (!isCurrentSourceGeneration(file, generationId)) {
+      if (!isCurrentGeneration()) {
         return null;
       }
 
@@ -2525,9 +3243,10 @@ async function assignCurrentSource(): Promise<void> {
     assignCheckpoint = {
       sourceFile,
       settings,
-      format
+      format,
+      gifSnapshot: state.sourceKind === "gif" ? captureGifSnapshot() : undefined
     };
-    loadSourceFile(assignedFile, { clearAssignCheckpoint: false });
+    loadSourceFile(assignedFile, { clearAssignCheckpoint: false, skipGifPreprocess: true });
     exportState.status = "idle";
     exportState.progress = 0;
     exportState.message = "Assigned to preview.";
@@ -2556,10 +3275,24 @@ function resetAssignedSource(): void {
   }
 
   assignCheckpoint = null;
-  loadSourceFile(checkpoint.sourceFile, {
-    restoreSettings: checkpoint.settings,
-    restoreFormat: checkpoint.format
-  });
+  if (checkpoint.gifSnapshot) {
+    beginSourceLoad(
+      checkpoint.sourceFile,
+      {
+        restoreSettings: checkpoint.settings,
+        restoreFormat: checkpoint.format,
+        skipGifPreprocess: true
+      },
+      checkpoint.gifSnapshot,
+      true
+    );
+  } else {
+    loadSourceFile(checkpoint.sourceFile, {
+      restoreSettings: checkpoint.settings,
+      restoreFormat: checkpoint.format,
+      skipGifPreprocess: true
+    });
+  }
   exportState.status = "idle";
   exportState.progress = 0;
   exportState.message = "Reset to the pre-assign source.";
@@ -4301,6 +5034,8 @@ function setPreviewControlsEnabled(enabled: boolean): void {
 }
 
 function resetSource(): void {
+  gifPreprocessGenerationId += 1;
+  closeGifPreprocessDialog(null);
   assignCheckpoint = null;
   pendingSettingsRestore = null;
   revokeSourceUrl();
