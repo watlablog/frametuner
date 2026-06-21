@@ -2,12 +2,6 @@ import "./style.css";
 
 import type { FFmpeg, LogEvent, ProgressEvent } from "@ffmpeg/ffmpeg";
 
-type ControlTile = {
-  title: string;
-  value: string;
-  note: string;
-};
-
 type PreviewState = {
   sourceKind: SourceKind;
   sourceFile: File | null;
@@ -30,6 +24,8 @@ type PreviewState = {
   resizeWidth: number;
   resizeHeight: number;
   resizeAspectLocked: boolean;
+  fpsMode: FpsMode;
+  fpsValue: number;
   thumbnailDataUrls: string[];
   thumbnailGenerationId: number;
   activeTrimEdge: TrimEdge | null;
@@ -40,6 +36,7 @@ type TrimEdge = "start" | "end";
 type CropMode = "full" | "16:9" | "9:16" | "1:1" | "free";
 type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 type ResizeMode = "original" | "custom";
+type FpsMode = "original" | "custom";
 type ExportFormat = "mp4" | "gif" | "png" | "jpeg" | "bmp";
 type ImageSequenceFormat = "png" | "jpeg" | "bmp";
 type ExportJobStatus = "idle" | "loading-ffmpeg" | "running" | "done" | "error";
@@ -141,6 +138,7 @@ type ExportCommandPlan = {
   saveAccept: Record<string, string[]>;
   args: string[];
   sequenceOutputDirectory?: string;
+  buildArgsWithVideoProbe?: (probe: VideoSourceProbe) => string[];
 };
 
 type EditSettingsSnapshot = {
@@ -153,6 +151,8 @@ type EditSettingsSnapshot = {
   resizeWidth: number;
   resizeHeight: number;
   resizeAspectLocked: boolean;
+  fpsMode: FpsMode;
+  fpsValue: number;
 };
 
 type AssignCheckpoint = {
@@ -197,6 +197,12 @@ type VideoMetadata = {
   duration: number;
   width: number;
   height: number;
+};
+
+type VideoSourceProbe = {
+  fps: number;
+  hasAudio: boolean;
+  usedFallbackFps: boolean;
 };
 
 type GifPreprocessCopy = {
@@ -298,6 +304,10 @@ const GIF_PREPROCESS_RENDER_CHUNK_SIZE = 120;
 const MIN_CROP_SIZE_RATIO = 0.12;
 const MIN_OUTPUT_DIMENSION = 2;
 const MAX_OUTPUT_DIMENSION = 7680;
+const FPS_MIN = 1;
+const FPS_MAX = 120;
+const FPS_DEFAULT = 30;
+const MIN_FRAME_DURATION_SECONDS = 1 / FPS_MAX;
 const FALLBACK_GIF_FRAME_DURATION_MS = 100;
 const IMAGE_SEQUENCE_FRAME_DURATION_SECONDS = 1 / 30;
 const IMAGE_SEQUENCE_FILE_COLLATOR = new Intl.Collator(undefined, {
@@ -312,6 +322,7 @@ const GIF_CONCAT_INPUT_NAME = "gif-frames.ffconcat";
 const GIF_FRAME_FILE_PREFIX = "gif-frame";
 const GIF_ESTIMATE_BYTES_PER_PIXEL_FRAME = 1.05;
 const GIF_ESTIMATE_VIDEO_FPS = 30;
+const VIDEO_SOURCE_FPS_FALLBACK = 30;
 const GIF_EXPORT_WARNING_BYTES = 64 * 1024 * 1024;
 const EXPORT_LOG_MAX_LINES = 240;
 const GIF_EXPORT_WARNING_MESSAGE =
@@ -392,19 +403,6 @@ const EXPORT_ICON = `
   </svg>
 `;
 
-const initialControlTiles: ControlTile[] = [
-  {
-    title: "FPS",
-    value: "Original",
-    note: "Frame rate"
-  },
-  {
-    title: "Audio",
-    value: "Keep",
-    note: "Mode"
-  }
-];
-
 const state: PreviewState = {
   sourceKind: "empty",
   sourceFile: null,
@@ -427,6 +425,8 @@ const state: PreviewState = {
   resizeWidth: 0,
   resizeHeight: 0,
   resizeAspectLocked: true,
+  fpsMode: "original",
+  fpsValue: FPS_DEFAULT,
   thumbnailDataUrls: [],
   thumbnailGenerationId: 0,
   activeTrimEdge: null
@@ -748,19 +748,40 @@ root.innerHTML = `
           </section>
 
           <div class="control-grid">
-            ${initialControlTiles
-              .map(
-                (control) => `
-                  <div class="control-tile">
-                    <div>
-                      <h3>${control.title}</h3>
-                      <p>${control.note}</p>
-                    </div>
-                    <span>${control.value}</span>
-                  </div>
-                `
-              )
-              .join("")}
+            <section class="control-tile fps-control" aria-labelledby="fps-title">
+              <div class="control-tile-heading">
+                <div>
+                  <h3 id="fps-title">FPS</h3>
+                  <p>Speed</p>
+                </div>
+                <span data-fps-summary>Original</span>
+              </div>
+              <div class="fps-mode-row" role="group" aria-label="FPS mode">
+                <button class="fps-mode-button" type="button" data-fps-mode="original" disabled>Original</button>
+                <button class="fps-mode-button" type="button" data-fps-mode="custom" disabled>Custom</button>
+              </div>
+              <label class="fps-value-field">
+                <span>FPS</span>
+                <input
+                  type="number"
+                  min="${FPS_MIN}"
+                  max="${FPS_MAX}"
+                  value="${FPS_DEFAULT}"
+                  step="0.1"
+                  inputmode="decimal"
+                  aria-label="Custom FPS"
+                  data-fps-value
+                  disabled
+                />
+              </label>
+            </section>
+            <div class="control-tile audio-tile">
+              <div>
+                <h3>Audio</h3>
+                <p>Mode</p>
+              </div>
+              <span data-audio-summary>Keep</span>
+            </div>
           </div>
 
           <section class="export-strip" aria-labelledby="export-title">
@@ -1010,6 +1031,10 @@ const resizeHeightInput = query<HTMLInputElement>("[data-resize-height]");
 const resizeAspectInput = query<HTMLInputElement>("[data-resize-aspect]");
 const resizeModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-resize-mode]"));
 const controlGrid = query<HTMLDivElement>(".control-grid");
+const fpsSummary = query<HTMLElement>("[data-fps-summary]");
+const fpsModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-fps-mode]"));
+const fpsValueInput = query<HTMLInputElement>("[data-fps-value]");
+const audioSummary = query<HTMLElement>("[data-audio-summary]");
 const exportStatus = query<HTMLElement>("[data-export-status]");
 const exportFormatSelect = query<HTMLSelectElement>("[data-export-format]");
 const exportAudioSelect = query<HTMLSelectElement>("[data-export-audio]");
@@ -1229,6 +1254,17 @@ resizeAspectInput.addEventListener("change", () => {
   invalidateExportOutput();
   renderResizeUi();
 });
+
+for (const button of fpsModeButtons) {
+  button.addEventListener("click", () => {
+    const mode = button.dataset.fpsMode as FpsMode | undefined;
+    if (mode) {
+      setFpsMode(mode);
+    }
+  });
+}
+
+fpsValueInput.addEventListener("change", applyFpsValueFromInput);
 
 cropBox.addEventListener("pointerdown", startCropDrag);
 cropBox.addEventListener("keydown", handleCropKeyboard);
@@ -1708,6 +1744,8 @@ function beginSourceLoad(
   state.resizeWidth = 0;
   state.resizeHeight = 0;
   state.resizeAspectLocked = true;
+  state.fpsMode = "original";
+  state.fpsValue = FPS_DEFAULT;
   state.thumbnailGenerationId += 1;
   const generationId = state.thumbnailGenerationId;
   pendingSettingsRestore = options.restoreSettings
@@ -2854,7 +2892,9 @@ function captureEditSettings(): EditSettingsSnapshot {
     resizeMode: state.resizeMode,
     resizeWidth: state.resizeWidth,
     resizeHeight: state.resizeHeight,
-    resizeAspectLocked: state.resizeAspectLocked
+    resizeAspectLocked: state.resizeAspectLocked,
+    fpsMode: state.fpsMode,
+    fpsValue: state.fpsValue
   };
 }
 
@@ -2909,6 +2949,8 @@ function restoreEditSettings(settings: EditSettingsSnapshot): void {
   state.resizeWidth = clamp(settings.resizeWidth, MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
   state.resizeHeight = clamp(settings.resizeHeight, MIN_OUTPUT_DIMENSION, MAX_OUTPUT_DIMENSION);
   state.resizeAspectLocked = settings.resizeAspectLocked;
+  state.fpsMode = isFpsEditable() ? settings.fpsMode : "original";
+  state.fpsValue = clampFpsValue(settings.fpsValue);
 }
 
 function handlePreviewLoadFailure(): void {
@@ -3176,7 +3218,78 @@ function isSingleFrameSource(): boolean {
 }
 
 function renderSourceModeUi(): void {
-  controlGrid.classList.toggle("is-hidden", isSingleFrameSource());
+  controlGrid.classList.toggle("is-hidden", state.sourceKind === "empty");
+  renderFpsUi();
+  renderAudioSummary();
+}
+
+function isFpsEditable(): boolean {
+  return (
+    state.canPreviewDirectly &&
+    state.sourceKind !== "empty" &&
+    !isSingleFrameSource() &&
+    (state.sourceKind !== "gif" || state.gifFrames.length > 1)
+  );
+}
+
+function isFpsSpeedChangeActive(): boolean {
+  return isFpsEditable() && state.fpsMode === "custom";
+}
+
+function setFpsMode(mode: FpsMode): void {
+  if (!isFpsEditable()) {
+    renderFpsUi();
+    return;
+  }
+
+  state.fpsMode = mode;
+  state.fpsValue = clampFpsValue(state.fpsValue);
+  invalidateExportOutput();
+  renderFpsUi();
+  renderExportUi();
+}
+
+function applyFpsValueFromInput(): void {
+  if (!isFpsEditable()) {
+    renderFpsUi();
+    return;
+  }
+
+  state.fpsMode = "custom";
+  state.fpsValue = clampFpsValue(Number(fpsValueInput.value));
+  invalidateExportOutput();
+  renderFpsUi();
+  renderExportUi();
+}
+
+function renderFpsUi(): void {
+  const editable = isFpsEditable();
+  const customActive = editable && state.fpsMode === "custom";
+  const safeFps = clampFpsValue(state.fpsValue);
+
+  state.fpsValue = safeFps;
+  fpsSummary.textContent = customActive ? `${formatFpsValue(safeFps)} fps` : "Original";
+  fpsValueInput.value = formatFpsValue(safeFps);
+  fpsValueInput.disabled = !customActive;
+
+  for (const button of fpsModeButtons) {
+    const mode = button.dataset.fpsMode as FpsMode | undefined;
+    const isSelected = editable && mode === state.fpsMode;
+    button.classList.toggle("is-selected", isSelected);
+    button.setAttribute("aria-pressed", String(isSelected));
+    button.disabled = !editable;
+  }
+}
+
+function renderAudioSummary(): void {
+  const format = getCurrentExportFormat();
+
+  if (state.sourceKind === "video" && format === "mp4") {
+    audioSummary.textContent = isFpsSpeedChangeActive() ? "Time-stretch" : "Keep";
+    return;
+  }
+
+  audioSummary.textContent = "No audio";
 }
 
 function seekPreviewToTime(time: number): void {
@@ -4332,11 +4445,21 @@ async function runFfmpegTransform(
 
     await prepareExportCommandInput(ffmpeg, commandPlan, sourceFile, workFiles);
 
+    if (commandPlan.buildArgsWithVideoProbe) {
+      if (!commandPlan.inputName) {
+        throw new Error("Video probe input is missing.");
+      }
+
+      const probe = await probeVideoSource(ffmpeg, commandPlan.inputName);
+      commandPlan.args = commandPlan.buildArgsWithVideoProbe(probe);
+    }
+
     exportState.progress = Math.max(exportState.progress, 0.16);
     exportState.message = `${runningMessage} ${formatExportLabel(commandPlan.format)}...`;
     appendExportLog(exportState.message);
     renderExportUi();
 
+    latestFfmpegLog = "";
     const exitCode = await ffmpeg.exec(commandPlan.args);
 
     if (exitCode !== 0) {
@@ -4456,7 +4579,7 @@ async function runCanvasImageSequenceExport(
   appendExportLog(exportState.message);
   renderExportUi();
 
-  const exportFrames = getFrameSequenceExportFrames();
+  const exportFrames = getFrameSequenceExportFrames(false);
 
   if (exportFrames.length === 0) {
     throw new Error("No frames are available for image sequence export.");
@@ -4520,6 +4643,64 @@ async function prepareVideoExportInput(
   await ffmpeg.writeFile(commandPlan.inputName, await fetchFile(sourceFile));
 }
 
+async function probeVideoSource(ffmpeg: FFmpeg, inputName: string): Promise<VideoSourceProbe> {
+  exportState.progress = Math.max(exportState.progress, 0.1);
+  exportState.message = "Reading source FPS...";
+  appendExportLog(exportState.message);
+  renderExportUi();
+
+  const logStartIndex = exportState.logs.length;
+
+  try {
+    await ffmpeg.exec(["-i", inputName]);
+  } catch {
+    // ffmpeg -i without an output is expected to fail after printing stream metadata.
+  }
+
+  const probeLogs = exportState.logs.slice(logStartIndex);
+  const parsedFps = parseVideoFpsFromLogs(probeLogs);
+  const hasAudio = probeLogs.some((line) => /\bAudio:/.test(line));
+  const fps = parsedFps ?? VIDEO_SOURCE_FPS_FALLBACK;
+
+  if (parsedFps) {
+    appendExportLog(`Detected source FPS: ${formatFfmpegNumber(parsedFps)}.`);
+  } else {
+    appendExportLog(`Source FPS could not be detected. Using ${VIDEO_SOURCE_FPS_FALLBACK} fps fallback.`);
+  }
+
+  appendExportLog(hasAudio ? "Audio stream detected." : "No audio stream detected.");
+
+  return {
+    fps,
+    hasAudio,
+    usedFallbackFps: !parsedFps
+  };
+}
+
+function parseVideoFpsFromLogs(logs: string[]): number | null {
+  const videoLines = logs.filter((line) => /\bVideo:/.test(line));
+  const fpsFromVideoLine = findNumericLogValue(videoLines, /\b([0-9]+(?:\.[0-9]+)?)\s*fps\b/);
+
+  if (fpsFromVideoLine !== null) {
+    return fpsFromVideoLine;
+  }
+
+  return findNumericLogValue(videoLines, /\b([0-9]+(?:\.[0-9]+)?)\s*tbr\b/);
+}
+
+function findNumericLogValue(lines: string[], pattern: RegExp): number | null {
+  for (const line of lines) {
+    const match = line.match(pattern);
+    const value = match ? Number(match[1]) : Number.NaN;
+
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 async function prepareFrameSequenceExportInput(ffmpeg: FFmpeg, workFiles: Set<string>): Promise<void> {
   const exportFrames = getFrameSequenceExportFrames();
 
@@ -4563,7 +4744,7 @@ async function prepareFrameSequenceExportInput(ffmpeg: FFmpeg, workFiles: Set<st
   );
 }
 
-function getFrameSequenceExportFrames(): CanvasExportFrame[] {
+function getFrameSequenceExportFrames(applyFpsSpeed = true): CanvasExportFrame[] {
   if (isSingleFrameSource()) {
     return [
       {
@@ -4573,13 +4754,16 @@ function getFrameSequenceExportFrames(): CanvasExportFrame[] {
     ];
   }
 
-  return getTrimmedGifExportFrames();
+  return getTrimmedGifExportFrames(applyFpsSpeed);
 }
 
-function getTrimmedGifExportFrames(): CanvasExportFrame[] {
+function getTrimmedGifExportFrames(applyFpsSpeed = true): CanvasExportFrame[] {
   const trimStart = clamp(state.trimStart, 0, state.duration);
   const trimEnd = clamp(state.trimEnd, trimStart, state.duration);
   const exportFrames: CanvasExportFrame[] = [];
+  const customFrameDuration = applyFpsSpeed && isFpsSpeedChangeActive()
+    ? 1 / clampFpsValue(state.fpsValue)
+    : null;
 
   for (const frame of state.gifFrames) {
     const frameStart = frame.startTime;
@@ -4591,7 +4775,7 @@ function getTrimmedGifExportFrames(): CanvasExportFrame[] {
     if (duration > 0.001) {
       exportFrames.push({
         canvas: frame.canvas,
-        duration: Math.max(0.02, duration)
+        duration: customFrameDuration ?? Math.max(MIN_FRAME_DURATION_SECONDS, duration)
       });
     }
   }
@@ -4819,7 +5003,7 @@ function buildGifConcatFile(frameNames: string[], exportFrames: CanvasExportFram
 }
 
 function formatConcatDuration(value: number): string {
-  return Math.max(0.02, value).toFixed(6);
+  return Math.max(MIN_FRAME_DURATION_SECONDS, value).toFixed(6);
 }
 
 async function requestImageSequenceSaveTarget(): Promise<ImageSequenceSaveTarget | null> {
@@ -4953,7 +5137,10 @@ function hasPendingEditSettings(): boolean {
     return state.cropMode !== "full" || state.resizeMode !== "original";
   }
 
-  return state.duration > 0 && (isTrimActive() || state.cropMode !== "full" || state.resizeMode !== "original");
+  return (
+    state.duration > 0 &&
+    (isTrimActive() || state.cropMode !== "full" || state.resizeMode !== "original" || isFpsSpeedChangeActive())
+  );
 }
 
 async function confirmLargeGifConversion(commandPlan: ExportCommandPlan): Promise<boolean> {
@@ -5329,6 +5516,10 @@ function buildVideoExportCommand(sourceFile: File, format: ExportFormat): Export
 }
 
 function buildVideoMp4ExportCommand(sourceFile: File): ExportCommandPlan {
+  if (isFpsSpeedChangeActive()) {
+    return buildVideoMp4SpeedChangeExportCommand(sourceFile);
+  }
+
   const inputName = `input.${getFileExtension(sourceFile.name)}`;
   const outputName = EXPORT_MP4_OUTPUT_NAME;
   const filters = buildVideoFilters();
@@ -5373,15 +5564,84 @@ function buildVideoMp4ExportCommand(sourceFile: File): ExportCommandPlan {
   };
 }
 
+function buildVideoMp4SpeedChangeExportCommand(sourceFile: File): ExportCommandPlan {
+  const inputName = `input.${getFileExtension(sourceFile.name)}`;
+  const outputName = EXPORT_MP4_OUTPUT_NAME;
+  const targetFps = clampFpsValue(state.fpsValue);
+
+  return {
+    sourceKind: "video",
+    format: "mp4",
+    execution: "ffmpeg",
+    inputName,
+    outputName,
+    outputFileName: getExportFileName(sourceFile.name, "mp4"),
+    outputMimeType: getExportMimeType("mp4"),
+    saveDescription: getExportSaveDescription("mp4"),
+    saveAccept: getExportSaveAccept("mp4"),
+    args: [],
+    buildArgsWithVideoProbe: (probe) => buildVideoMp4SpeedChangeArgs(inputName, outputName, targetFps, probe)
+  };
+}
+
+function buildVideoMp4SpeedChangeArgs(
+  inputName: string,
+  outputName: string,
+  targetFps: number,
+  probe: VideoSourceProbe
+): string[] {
+  const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+  const videoFilters = buildVideoSpeedChangeFilters(targetFps, trimDuration);
+  const args = [
+    "-y",
+    "-i", inputName,
+    "-filter_complex"
+  ];
+
+  if (probe.hasAudio) {
+    const speedRatio = targetFps / probe.fps;
+    const audioFilters = [
+      `atrim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
+      "asetpts=PTS-STARTPTS",
+      ...buildAtempoFilterChain(speedRatio)
+    ];
+    args.push(`[0:v:0]${videoFilters.join(",")}[v];[0:a:0]${audioFilters.join(",")}[a]`);
+    args.push("-map", "[v]", "-map", "[a]");
+  } else {
+    args.push(`[0:v:0]${videoFilters.join(",")}[v]`);
+    args.push("-map", "[v]", "-an");
+  }
+
+  args.push(
+    "-dn",
+    "-sn",
+    "-fps_mode", "passthrough",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "23",
+    "-pix_fmt", "yuv420p"
+  );
+
+  if (probe.hasAudio) {
+    args.push("-c:a", "aac", "-b:a", "128k");
+  }
+
+  args.push("-movflags", "+faststart", outputName);
+
+  return args;
+}
+
 function buildVideoGifExportCommand(sourceFile: File): ExportCommandPlan {
   const inputName = `input.${getFileExtension(sourceFile.name)}`;
   const outputName = EXPORT_GIF_OUTPUT_NAME;
   const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
-  const frameFilters = [
-    `trim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
-    "setpts=PTS-STARTPTS",
-    ...buildVideoFilters()
-  ];
+  const frameFilters = isFpsSpeedChangeActive()
+    ? buildVideoSpeedChangeFilters(clampFpsValue(state.fpsValue), trimDuration)
+    : [
+        `trim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
+        "setpts=PTS-STARTPTS",
+        ...buildVideoFilters()
+      ];
   const filterGraph = `[0:v]${frameFilters.join(",")},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a[v]`;
   const args = [
     "-y",
@@ -5536,6 +5796,32 @@ function buildGifMp4ExportArgs(outputName: string): string[] {
   ];
 }
 
+function buildVideoSpeedChangeFilters(targetFps: number, trimDuration: number): string[] {
+  return [
+    `trim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
+    `setpts=N/(${formatFfmpegNumber(targetFps)}*TB)`,
+    ...buildVideoFilters()
+  ];
+}
+
+function buildAtempoFilterChain(speedRatio: number): string[] {
+  const filters: string[] = [];
+  let remainingRatio = Number.isFinite(speedRatio) && speedRatio > 0 ? speedRatio : 1;
+
+  while (remainingRatio < 0.5) {
+    filters.push("atempo=0.5");
+    remainingRatio /= 0.5;
+  }
+
+  while (remainingRatio > 2) {
+    filters.push("atempo=2");
+    remainingRatio /= 2;
+  }
+
+  filters.push(`atempo=${formatFfmpegNumber(remainingRatio)}`);
+  return filters;
+}
+
 function buildVideoFilters(): string[] {
   const filters: string[] = [];
   const crop = getExportCropRect();
@@ -5599,7 +5885,9 @@ function renderExportUi(): void {
     !state.canPreviewDirectly ||
     availableFormats.length <= 1;
   exportAudioSelect.options[0].textContent =
-    state.sourceKind === "video" && currentFormat === "mp4" ? "Keep audio" : "No audio";
+    state.sourceKind === "video" && currentFormat === "mp4"
+      ? isFpsSpeedChangeActive() ? "Time-stretch audio" : "Keep audio"
+      : "No audio";
   assignButton.disabled = !canAssign;
   assignResetButton.disabled = !canResetAssign;
   exportButton.disabled = !canExport;
@@ -5636,6 +5924,7 @@ function renderExportUi(): void {
   }
 
   renderExportLog();
+  renderAudioSummary();
 }
 
 function renderExportFormatOptions(availableFormats: ExportFormat[], currentFormat: ExportFormat): void {
@@ -5821,6 +6110,14 @@ function sanitizeFileNameBase(name: string): string {
 
 function formatFfmpegSeconds(value: number): string {
   return Math.max(0, roundTime(value)).toFixed(3);
+}
+
+function formatFfmpegNumber(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "1";
+  }
+
+  return Number(value.toFixed(6)).toString();
 }
 
 function floorEven(value: number): number {
@@ -6256,6 +6553,8 @@ function resetSource(): void {
   state.resizeWidth = 0;
   state.resizeHeight = 0;
   state.resizeAspectLocked = true;
+  state.fpsMode = "original";
+  state.fpsValue = FPS_DEFAULT;
   state.thumbnailGenerationId += 1;
 
   fileInput.value = "";
@@ -6317,6 +6616,16 @@ function resetStaticImageState(): void {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function clampFpsValue(value: number): number {
+  const safeValue = Number.isFinite(value) ? value : FPS_DEFAULT;
+  return Math.round(clamp(safeValue, FPS_MIN, FPS_MAX) * 10) / 10;
+}
+
+function formatFpsValue(value: number): string {
+  const safeValue = clampFpsValue(value);
+  return Number.isInteger(safeValue) ? String(safeValue) : safeValue.toFixed(1);
 }
 
 function roundTime(value: number): number {

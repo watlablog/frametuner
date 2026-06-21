@@ -1265,6 +1265,14 @@ input:disabled {
   background: var(--surface-tint);
 }
 
+.control-tile-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
 .control-tile h3 {
   color: #ffffff;
   font-size: 0.9rem;
@@ -1284,6 +1292,86 @@ input:disabled {
   color: var(--success);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.fps-control {
+  gap: 7px;
+}
+
+.fps-mode-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.fps-mode-button {
+  min-width: 0;
+  min-height: 30px;
+  border: 1px solid rgba(141, 189, 255, 0.18);
+  border-radius: 8px;
+  padding: 5px 7px;
+  color: var(--muted);
+  background: rgba(3, 11, 22, 0.42);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.fps-mode-button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(141, 189, 255, 0.36);
+}
+
+.fps-mode-button:focus-visible {
+  outline: 2px solid rgba(78, 166, 255, 0.88);
+  outline-offset: 2px;
+}
+
+.fps-mode-button.is-selected {
+  color: #ffffff;
+  border-color: rgba(78, 166, 255, 0.52);
+  background: rgba(78, 166, 255, 0.2);
+}
+
+.fps-mode-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.fps-value-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.fps-value-field span {
+  align-self: center;
+  overflow: visible;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.fps-value-field input {
+  width: 100%;
+  min-height: 31px;
+  border: 1px solid rgba(141, 189, 255, 0.22);
+  border-radius: 8px;
+  padding: 5px 8px;
+  color: var(--text);
+  background: var(--surface-subtle);
+  font: inherit;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.fps-value-field input:disabled {
+  color: rgba(220, 233, 255, 0.45);
+  cursor: not-allowed;
 }
 
 .export-strip {
@@ -2177,6 +2265,27 @@ input:disabled {
   .control-tile p,
   .control-tile span {
     font-size: 0.68rem;
+  }
+
+  .fps-control {
+    gap: 5px;
+  }
+
+  .fps-mode-button {
+    min-height: 28px;
+    padding: 4px 5px;
+    font-size: 0.66rem;
+  }
+
+  .fps-value-field {
+    gap: 5px;
+    font-size: 0.68rem;
+  }
+
+  .fps-value-field input {
+    min-height: 29px;
+    padding: 4px 6px;
+    font-size: 0.7rem;
   }
 
   .export-grid {
