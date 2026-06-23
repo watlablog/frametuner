@@ -1,6 +1,9 @@
 import "./style.css";
 
 import type { FFmpeg, LogEvent, ProgressEvent } from "@ffmpeg/ffmpeg";
+import packageManifest from "../package.json";
+
+const APP_VERSION = packageManifest.version;
 
 type PreviewState = {
   sourceKind: SourceKind;
@@ -39,7 +42,7 @@ type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 type ResizeMode = "original" | "custom";
 type FpsMode = "original" | "custom";
 type AudioMode = "keep" | "remove";
-type ExportFormat = "mp4" | "gif" | "png" | "jpeg" | "bmp";
+type ExportFormat = "mp4" | "gif" | "png" | "jpeg" | "bmp" | "wav";
 type ImageSequenceFormat = "png" | "jpeg" | "bmp";
 type ExportJobStatus = "idle" | "loading-ffmpeg" | "running" | "done" | "error";
 
@@ -321,6 +324,7 @@ const FFMPEG_CORE_URL = "/ffmpeg/ffmpeg-core.js";
 const FFMPEG_WASM_URL = "/ffmpeg/ffmpeg-core.wasm";
 const EXPORT_MP4_OUTPUT_NAME = "output.mp4";
 const EXPORT_GIF_OUTPUT_NAME = "output.gif";
+const EXPORT_WAV_OUTPUT_NAME = "output.wav";
 const GIF_CONCAT_INPUT_NAME = "gif-frames.ffconcat";
 const GIF_FRAME_FILE_PREFIX = "gif-frame";
 const GIF_ESTIMATE_BYTES_PER_PIXEL_FRAME = 1.05;
@@ -459,7 +463,10 @@ root.innerHTML = `
   <div class="app-shell">
     <header class="app-header">
       <div class="brand-lockup">
-        <h1 class="brand-wordmark">FrameTuner</h1>
+        <div class="brand-title-row">
+          <h1 class="brand-wordmark">FrameTuner</h1>
+          <span class="app-version">v${APP_VERSION}</span>
+        </div>
         <p class="app-copy">Browser-based video trimming and tuning tool.</p>
       </div>
     </header>
@@ -4644,7 +4651,7 @@ async function prepareVideoExportInput(
 
 async function probeVideoSource(ffmpeg: FFmpeg, inputName: string): Promise<VideoSourceProbe> {
   exportState.progress = Math.max(exportState.progress, 0.1);
-  exportState.message = "Reading source FPS...";
+  exportState.message = "Reading source streams...";
   appendExportLog(exportState.message);
   renderExportUi();
 
@@ -5381,7 +5388,7 @@ function getCurrentExportFormat(): ExportFormat {
 
 function getAvailableExportFormats(): ExportFormat[] {
   if (state.sourceKind === "video") {
-    return ["mp4", "gif", "png", "jpeg", "bmp"];
+    return ["mp4", "gif", "wav", "png", "jpeg", "bmp"];
   }
 
   if (state.sourceKind === "gif") {
@@ -5396,7 +5403,7 @@ function getAvailableExportFormats(): ExportFormat[] {
 }
 
 function isExportFormat(value: string): value is ExportFormat {
-  return ["mp4", "gif", "png", "jpeg", "bmp"].includes(value);
+  return ["mp4", "gif", "png", "jpeg", "bmp", "wav"].includes(value);
 }
 
 function isImageSequenceFormat(format: ExportFormat): format is ImageSequenceFormat {
@@ -5416,6 +5423,10 @@ function getExportMimeType(format: ExportFormat): string {
     return "video/mp4";
   }
 
+  if (format === "wav") {
+    return "audio/wav";
+  }
+
   if (format === "jpeg") {
     return "image/jpeg";
   }
@@ -5426,6 +5437,10 @@ function getExportMimeType(format: ExportFormat): string {
 function getExportSaveDescription(format: ExportFormat): string {
   if (format === "mp4") {
     return "MP4 video";
+  }
+
+  if (format === "wav") {
+    return "WAV audio";
   }
 
   return `${formatExportLabel(format)} image`;
@@ -5527,6 +5542,10 @@ function buildVideoExportCommand(sourceFile: File, format: ExportFormat): Export
 
   if (format === "gif") {
     return buildVideoGifExportCommand(sourceFile);
+  }
+
+  if (format === "wav") {
+    return buildVideoWavExportCommand(sourceFile);
   }
 
   return buildVideoMp4ExportCommand(sourceFile);
@@ -5688,6 +5707,54 @@ function buildVideoGifExportCommand(sourceFile: File): ExportCommandPlan {
     saveAccept: getExportSaveAccept("gif"),
     args
   };
+}
+
+function buildVideoWavExportCommand(sourceFile: File): ExportCommandPlan {
+  const inputName = `input.${getFileExtension(sourceFile.name)}`;
+
+  return {
+    sourceKind: "video",
+    format: "wav",
+    execution: "ffmpeg",
+    inputName,
+    outputName: EXPORT_WAV_OUTPUT_NAME,
+    outputFileName: getExportFileName(sourceFile.name, "wav"),
+    outputMimeType: getExportMimeType("wav"),
+    saveDescription: getExportSaveDescription("wav"),
+    saveAccept: getExportSaveAccept("wav"),
+    args: [],
+    buildArgsWithVideoProbe: (probe) => buildVideoWavExportArgs(inputName, EXPORT_WAV_OUTPUT_NAME, probe)
+  };
+}
+
+function buildVideoWavExportArgs(
+  inputName: string,
+  outputName: string,
+  probe: VideoSourceProbe
+): string[] {
+  if (!probe.hasAudio) {
+    throw new Error("No audio stream is available for WAV export.");
+  }
+
+  const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+  const audioFilters = [
+    `atrim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
+    "asetpts=PTS-STARTPTS"
+  ];
+
+  if (isFpsSpeedChangeActive()) {
+    audioFilters.push(...buildAtempoFilterChain(clampFpsValue(state.fpsValue) / probe.fps));
+  }
+
+  return [
+    "-y",
+    "-i", inputName,
+    "-filter_complex", `[0:a:0]${audioFilters.join(",")}[a]`,
+    "-map", "[a]",
+    "-vn",
+    "-c:a", "pcm_s16le",
+    outputName
+  ];
 }
 
 function buildVideoImageSequenceExportCommand(
@@ -5976,7 +6043,9 @@ function renderExportAudioOptions(currentFormat: ExportFormat): void {
         { value: "keep", label: "Keep audio" },
         { value: "remove", label: "Remove audio" }
       ]
-    : [{ value: "none", label: "No audio" }];
+    : currentFormat === "wav"
+      ? [{ value: "audio-only", label: "Audio only" }]
+      : [{ value: "none", label: "No audio" }];
   const nextOptionSignature = options.map((option) => `${option.value}:${option.label}`).join(",");
   const currentOptionSignature = Array.from(exportAudioSelect.options)
     .map((option) => `${option.value}:${option.textContent ?? ""}`)
@@ -5993,7 +6062,7 @@ function renderExportAudioOptions(currentFormat: ExportFormat): void {
     );
   }
 
-  exportAudioSelect.value = editable ? state.audioMode : "none";
+  exportAudioSelect.value = editable ? state.audioMode : currentFormat === "wav" ? "audio-only" : "none";
 }
 
 function renderExportLog(): void {
