@@ -226,7 +226,7 @@ p {
 
 .control-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 8px;
   padding: 10px;
   overflow: hidden;
@@ -1940,6 +1940,7 @@ input:disabled {
 }
 
 .export-result-dialog {
+  min-width: 0;
   border-color: rgba(141, 189, 255, 0.34);
   text-align: center;
 }
@@ -1965,6 +1966,9 @@ input:disabled {
 }
 
 .export-result-dialog p {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 0.86rem;
   line-height: 1.45;
@@ -1973,7 +1977,15 @@ input:disabled {
 .export-result-download {
   display: inline-flex;
   justify-content: center;
+  min-width: 0;
   width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.export-result-dialog .button {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .export-result-download.is-hidden {

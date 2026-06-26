@@ -33,6 +33,7 @@ type PreviewState = {
   thumbnailDataUrls: string[];
   thumbnailGenerationId: number;
   activeTrimEdge: TrimEdge | null;
+  compatibilityFallbackAllowed: boolean;
 };
 
 type SourceKind = "empty" | "video" | "gif" | "image";
@@ -307,7 +308,7 @@ const TRIM_THUMBNAIL_COUNT = 12;
 const TRIM_THUMBNAIL_WIDTH = 160;
 const TRIM_THUMBNAIL_HEIGHT = 90;
 const TRIM_FILMSTRIP_HIDE_DELAY_MS = 180;
-const VIDEO_METADATA_LOAD_TIMEOUT_MS = 30000;
+const VIDEO_METADATA_LOAD_TIMEOUT_MS = 5000;
 const IMAGE_SEQUENCE_PROGRESS_YIELD_INTERVAL = 24;
 const GIF_PREPROCESS_RENDER_CHUNK_SIZE = 120;
 const MIN_CROP_SIZE_RATIO = 0.12;
@@ -452,7 +453,8 @@ const state: PreviewState = {
   audioMode: "keep",
   thumbnailDataUrls: [],
   thumbnailGenerationId: 0,
-  activeTrimEdge: null
+  activeTrimEdge: null,
+  compatibilityFallbackAllowed: false
 };
 
 const exportState: ExportJobState = {
@@ -827,50 +829,6 @@ root.innerHTML = `
               </label>
             </section>
           </div>
-
-          <section class="export-strip" aria-labelledby="export-title">
-            <div class="export-heading">
-              <div>
-                <h2 id="export-title">Output</h2>
-              </div>
-              <span class="status-pill status-pill-muted" data-export-status>Not ready</span>
-            </div>
-
-            <div class="export-grid">
-              <label>
-                <span>Format</span>
-                <select data-export-format disabled>
-                  <option value="mp4">MP4</option>
-                  <option value="gif">GIF</option>
-                </select>
-              </label>
-              <label>
-                <span>Quality</span>
-                <select disabled>
-                  <option>Standard</option>
-                </select>
-              </label>
-              <label>
-                <span>Audio</span>
-                <select data-export-audio disabled>
-                  <option>Keep audio</option>
-                </select>
-              </label>
-            </div>
-
-            <div class="export-actions" aria-label="Apply and export actions">
-              <button class="button" type="button" data-assign-button disabled>Assign</button>
-              <button class="button" type="button" data-assign-reset disabled>Reset</button>
-              <button class="button primary export-button" type="button" data-export-button disabled>
-                ${EXPORT_ICON}
-                <span>Export</span>
-              </button>
-            </div>
-
-            <div class="progress-shell" aria-label="Export progress">
-              <span class="progress-bar" data-export-progress style="width: 0%"></span>
-            </div>
-          </section>
         </div>
 
         <div
@@ -889,6 +847,50 @@ root.innerHTML = `
             <pre class="export-log" data-export-log aria-live="polite"></pre>
           </div>
         </div>
+
+        <section class="export-strip" aria-labelledby="export-title">
+          <div class="export-heading">
+            <div>
+              <h2 id="export-title">Output</h2>
+            </div>
+            <span class="status-pill status-pill-muted" data-export-status>Not ready</span>
+          </div>
+
+          <div class="export-grid">
+            <label>
+              <span>Format</span>
+              <select data-export-format disabled>
+                <option value="mp4">MP4</option>
+                <option value="gif">GIF</option>
+              </select>
+            </label>
+            <label>
+              <span>Quality</span>
+              <select disabled>
+                <option>Standard</option>
+              </select>
+            </label>
+            <label>
+              <span>Audio</span>
+              <select data-export-audio disabled>
+                <option>Keep audio</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="export-actions" aria-label="Apply and export actions">
+            <button class="button" type="button" data-assign-button disabled>Assign</button>
+            <button class="button" type="button" data-assign-reset disabled>Reset</button>
+            <button class="button primary export-button" type="button" data-export-button disabled>
+              ${EXPORT_ICON}
+              <span>Export</span>
+            </button>
+          </div>
+
+          <div class="progress-shell" aria-label="Export progress">
+            <span class="progress-bar" data-export-progress style="width: 0%"></span>
+          </div>
+        </section>
       </aside>
     </main>
   </div>
@@ -1158,6 +1160,7 @@ let ffmpegInstance: FFmpeg | null = null;
 let ffmpegLoadPromise: Promise<FFmpeg> | null = null;
 let latestFfmpegLog = "";
 let activeExportTab: "settings" | "log" = "settings";
+let exportTabSwitchRevision = 0;
 let gifPreprocessGenerationId = 0;
 let exportWarningDialogResolve: ((confirmed: boolean) => void) | null = null;
 let exportWarningPreviousFocus: HTMLElement | null = null;
@@ -1239,9 +1242,7 @@ video.addEventListener("pause", updatePlaybackUi);
 video.addEventListener("ended", updatePlaybackUi);
 
 video.addEventListener("error", () => {
-  if (state.sourceKind === "video") {
-    handlePreviewLoadFailure();
-  }
+  void handlePreviewVideoError();
 });
 
 playToggle.addEventListener("click", async () => {
@@ -1370,8 +1371,7 @@ for (const button of exportTabButtons) {
   button.addEventListener("click", () => {
     const tab = button.dataset.exportTab;
     if (tab === "settings" || tab === "log") {
-      activeExportTab = tab;
-      renderExportUi();
+      setActiveExportTab(tab);
     }
   });
 }
@@ -1657,6 +1657,7 @@ function showSourceCompatibilityDialog(mode: SourceCompatibilityDialogMode): Pro
 
   return new Promise((resolve) => {
     sourceCompatibilityDialogResolve = (confirmed) => {
+      const dialogMode = sourceCompatibilityDialogMode;
       sourceCompatibilityDialog.hidden = true;
       sourceCompatibilityDialog.setAttribute("aria-hidden", "true");
       sourceCompatibilityDialogResolve = null;
@@ -1667,6 +1668,10 @@ function showSourceCompatibilityDialog(mode: SourceCompatibilityDialogMode): Pro
         document.contains(sourceCompatibilityPreviousFocus)
       ) {
         sourceCompatibilityPreviousFocus.focus();
+      }
+
+      if (dialogMode === "failure") {
+        showSettingsTabAfterProcessing();
       }
 
       sourceCompatibilityPreviousFocus = null;
@@ -1901,6 +1906,89 @@ async function handleBrowserVideoPreviewFailure(
   await convertAndLoadBrowserCompatibleVideo(file, options);
 }
 
+async function handlePreviewVideoError(): Promise<void> {
+  if (state.sourceKind !== "video") {
+    return;
+  }
+
+  if (sourceCompatibilityDialogResolve && sourceCompatibilityDialogMode === "prompt") {
+    return;
+  }
+
+  const sourceFile = state.sourceFile;
+  const errorMessage = getPreviewVideoErrorMessage();
+
+  appendExportLog(`Preview video failed: ${errorMessage}`);
+  activeExportTab = "log";
+  renderExportUi();
+
+  if (sourceFile && state.compatibilityFallbackAllowed) {
+    state.compatibilityFallbackAllowed = false;
+    appendExportLog("Browser preview failed after source metadata was accepted.");
+    const shouldConvert = await showSourceCompatibilityPromptDialog();
+
+    if (shouldConvert) {
+      await convertAndLoadBrowserCompatibleVideo(sourceFile, {
+        skipCompatibilityFallback: true
+      });
+      return;
+    }
+
+    fileInput.value = "";
+  }
+
+  handlePreviewLoadFailure();
+}
+
+async function handleInvalidLoadedVideoMetadata(
+  sourceFile: File,
+  metadata: VideoMetadata
+): Promise<void> {
+  if (sourceCompatibilityDialogResolve && sourceCompatibilityDialogMode === "prompt") {
+    return;
+  }
+
+  appendExportLog(
+    `Browser video metadata is not usable. Duration: ${metadata.duration}, size: ${metadata.width} x ${metadata.height}.`
+  );
+  activeExportTab = "log";
+  renderExportUi();
+
+  if (state.compatibilityFallbackAllowed) {
+    state.compatibilityFallbackAllowed = false;
+    const shouldConvert = await showSourceCompatibilityPromptDialog();
+
+    if (shouldConvert) {
+      await convertAndLoadBrowserCompatibleVideo(sourceFile, {
+        skipCompatibilityFallback: true
+      });
+      return;
+    }
+
+    fileInput.value = "";
+  }
+
+  handlePreviewLoadFailure();
+}
+
+function getPreviewVideoErrorMessage(): string {
+  const mediaError = video.error;
+
+  if (!mediaError) {
+    return "Unknown browser media error.";
+  }
+
+  const errorNames: Record<number, string> = {
+    [MediaError.MEDIA_ERR_ABORTED]: "Media loading was aborted.",
+    [MediaError.MEDIA_ERR_NETWORK]: "A network error interrupted media loading.",
+    [MediaError.MEDIA_ERR_DECODE]: "The browser could not decode this video.",
+    [MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED]: "The browser does not support this video source."
+  };
+  const detail = mediaError.message ? ` ${mediaError.message}` : "";
+
+  return `${errorNames[mediaError.code] ?? "Browser media error."} Code: ${mediaError.code}.${detail}`;
+}
+
 function handleSourceLoadFailure(
   error: unknown,
   controller: SourceLoadController,
@@ -1938,8 +2026,7 @@ async function convertAndLoadBrowserCompatibleVideo(
   let ffmpeg: FFmpeg | null = null;
 
   appendExportLog("Converting source to browser-compatible MP4.");
-  activeExportTab = "log";
-  renderExportUi();
+  showProcessingLogTab();
 
   controller.onCancel(() => {
     if (ffmpeg) {
@@ -1962,6 +2049,7 @@ async function convertAndLoadBrowserCompatibleVideo(
     controller.throwIfCanceled();
 
     controller.update("Converting video for browser preview...", 0.16);
+    const conversionLogStartIndex = exportState.logs.length;
     const exitCode = await ffmpeg.exec(buildBrowserCompatibleVideoArgs(inputName, outputName));
 
     if (exitCode !== 0) {
@@ -1978,7 +2066,9 @@ async function convertAndLoadBrowserCompatibleVideo(
     outputBytes.set(convertedBytes);
     const convertedBlob = new Blob([outputBytes.buffer], { type: getExportMimeType("mp4") });
     const convertedFile = createBrowserCompatibleVideoFile(file.name, convertedBlob);
-    const metadata = await loadVideoMetadata(convertedFile, controller);
+    const metadata =
+      parseVideoMetadataFromFfmpegLogs(exportState.logs.slice(conversionLogStartIndex)) ??
+      await loadVideoMetadata(convertedFile, controller, false);
 
     controller.throwIfCanceled();
     controller.update("Preparing preview...", 0.96);
@@ -1996,9 +2086,8 @@ async function convertAndLoadBrowserCompatibleVideo(
       metadata
     );
     exportState.logs = conversionLogs;
-    activeExportTab = "log";
-    renderExportUi();
     closeSourceLoadDialog(controller.generationId);
+    showSettingsTabAfterProcessing();
   } catch (error) {
     if (controller.isCanceled() || isSourceLoadCanceledError(error)) {
       fileInput.value = "";
@@ -2008,12 +2097,12 @@ async function convertAndLoadBrowserCompatibleVideo(
       }
 
       closeSourceLoadDialog(controller.generationId);
+      showSettingsTabAfterProcessing();
       return;
     }
 
     const message = error instanceof Error ? error.message : "Conversion failed.";
     appendExportLog(`Compatibility conversion failed: ${message}`);
-    activeExportTab = "log";
     fileInput.value = "";
     closeSourceLoadDialog(controller.generationId);
 
@@ -2022,7 +2111,7 @@ async function convertAndLoadBrowserCompatibleVideo(
     }
 
     showSourceCompatibilityFailureDialog();
-    renderExportUi();
+    showSettingsTabAfterProcessing();
   } finally {
     sourceCompatibilityConversionController = null;
 
@@ -2108,6 +2197,8 @@ function beginSourceLoad(
   state.fpsMode = "original";
   state.fpsValue = FPS_DEFAULT;
   state.audioMode = "keep";
+  state.compatibilityFallbackAllowed =
+    state.sourceKind === "video" && options.skipCompatibilityFallback !== true;
   state.thumbnailGenerationId += 1;
   const generationId = state.thumbnailGenerationId;
   pendingSettingsRestore = options.restoreSettings
@@ -3037,7 +3128,7 @@ function initializeLoadedVideo(file: File, generationId: number, metadata: Video
   }
 
   if (metadata.duration <= 0 || metadata.width <= 0 || metadata.height <= 0) {
-    handlePreviewLoadFailure();
+    void handleInvalidLoadedVideoMetadata(file, metadata);
     return;
   }
 
@@ -3061,22 +3152,29 @@ function initializeLoadedVideo(file: File, generationId: number, metadata: Video
   void generateTrimThumbnails();
 }
 
-function loadVideoMetadata(file: File, controller: SourceLoadController): Promise<VideoMetadata> {
+function loadVideoMetadata(
+  file: File,
+  controller: SourceLoadController,
+  requirePreviewFrame = true
+): Promise<VideoMetadata> {
   controller.update("Reading video metadata...", 0.18);
 
   return new Promise((resolve, reject) => {
     const metadataVideo = document.createElement("video");
     const metadataUrl = URL.createObjectURL(file);
+    let loadedMetadata: VideoMetadata | null = null;
     let settled = false;
     const timeoutId = window.setTimeout(() => {
       settle(() => {
-        reject(new BrowserVideoPreviewError("Video metadata timed out in the browser."));
+        reject(new BrowserVideoPreviewError("Video preview check timed out in the browser."));
       });
     }, VIDEO_METADATA_LOAD_TIMEOUT_MS);
 
     const cleanup = (): void => {
       window.clearTimeout(timeoutId);
       metadataVideo.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      metadataVideo.removeEventListener("loadeddata", handleLoadedData);
+      metadataVideo.removeEventListener("canplay", handleLoadedData);
       metadataVideo.removeEventListener("error", handleError);
       metadataVideo.remove();
       URL.revokeObjectURL(metadataUrl);
@@ -3090,24 +3188,83 @@ function loadVideoMetadata(file: File, controller: SourceLoadController): Promis
       cleanup();
       callback();
     };
-    const handleLoadedMetadata = (): void => {
+    const isMetadataUsable = (metadata: VideoMetadata): boolean =>
+      metadata.duration > 0 && metadata.width > 0 && metadata.height > 0;
+    const rejectUnusableMetadata = (metadata: VideoMetadata): void => {
+      settle(() => {
+        reject(
+          new BrowserVideoPreviewError(
+            `Browser video metadata is not usable. Duration: ${metadata.duration}, size: ${metadata.width} x ${metadata.height}.`
+          )
+        );
+      });
+    };
+    const resolveIfPreviewReady = (): void => {
+      const metadata = loadedMetadata;
+
+      if (!metadata || metadataVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        return;
+      }
+
+      if (!isMetadataUsable(metadata)) {
+        rejectUnusableMetadata(metadata);
+        return;
+      }
+
       settle(() => {
         if (controller.isCanceled()) {
           reject(new SourceLoadCanceledError());
           return;
         }
 
-        controller.update("Preparing video preview...", 0.78);
-        resolve({
-          duration: Number.isFinite(metadataVideo.duration) ? metadataVideo.duration : 0,
-          width: metadataVideo.videoWidth,
-          height: metadataVideo.videoHeight
-        });
+        resolve(metadata);
       });
+    };
+    const handleLoadedMetadata = (): void => {
+      if (controller.isCanceled()) {
+        settle(() => {
+          reject(new SourceLoadCanceledError());
+        });
+        return;
+      }
+
+      loadedMetadata = {
+        duration: Number.isFinite(metadataVideo.duration) ? metadataVideo.duration : 0,
+        width: metadataVideo.videoWidth,
+        height: metadataVideo.videoHeight
+      };
+
+      if (!isMetadataUsable(loadedMetadata)) {
+        rejectUnusableMetadata(loadedMetadata);
+        return;
+      }
+
+      if (!requirePreviewFrame) {
+        const metadata = loadedMetadata;
+
+        settle(() => {
+          if (controller.isCanceled()) {
+            reject(new SourceLoadCanceledError());
+            return;
+          }
+
+          resolve(metadata);
+        });
+        return;
+      }
+
+      controller.update("Checking browser video preview...", 0.58);
+      resolveIfPreviewReady();
+    };
+    const handleLoadedData = (): void => {
+      controller.update("Preparing video preview...", 0.78);
+      resolveIfPreviewReady();
     };
     const handleError = (): void => {
       settle(() => {
-        reject(new BrowserVideoPreviewError());
+        const mediaError = metadataVideo.error;
+        const detail = mediaError ? ` Browser media error code: ${mediaError.code}.` : "";
+        reject(new BrowserVideoPreviewError(`Video preview could not be loaded by the browser.${detail}`));
       });
     };
 
@@ -3120,7 +3277,7 @@ function loadVideoMetadata(file: File, controller: SourceLoadController): Promis
       });
     });
 
-    metadataVideo.preload = "metadata";
+    metadataVideo.preload = "auto";
     metadataVideo.muted = true;
     metadataVideo.playsInline = true;
     metadataVideo.style.position = "fixed";
@@ -3129,6 +3286,8 @@ function loadVideoMetadata(file: File, controller: SourceLoadController): Promis
     metadataVideo.style.opacity = "0";
     metadataVideo.style.pointerEvents = "none";
     metadataVideo.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
+    metadataVideo.addEventListener("loadeddata", handleLoadedData, { once: true });
+    metadataVideo.addEventListener("canplay", handleLoadedData, { once: true });
     metadataVideo.addEventListener("error", handleError, { once: true });
     document.body.append(metadataVideo);
     metadataVideo.src = metadataUrl;
@@ -4520,7 +4679,7 @@ async function assignCurrentSource(): Promise<void> {
     exportState.progress = 0;
     exportState.message = "Assign canceled.";
     appendExportLog("Assign canceled.");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
     return;
   }
 
@@ -4540,14 +4699,13 @@ async function assignCurrentSource(): Promise<void> {
     exportState.message = "Assigned to preview.";
     exportState.logs = conversionLogs;
     appendExportLog(exportState.message);
-    renderExportUi();
+    showSettingsTabAfterProcessing();
   } catch (error) {
     exportState.status = "error";
     exportState.progress = 0;
     exportState.message = error instanceof Error ? error.message : "Assign failed.";
     appendExportLog(`Assign failed: ${exportState.message}`);
-    activeExportTab = "log";
-    renderExportUi();
+    showSettingsTabAfterProcessing();
   }
 }
 
@@ -4606,7 +4764,7 @@ async function exportCurrentSource(): Promise<void> {
     exportState.progress = 0;
     exportState.message = "Export canceled.";
     appendExportLog("Export canceled.");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
     return;
   }
 
@@ -4624,9 +4782,8 @@ async function exportCurrentSource(): Promise<void> {
     exportState.progress = 0;
     exportState.message = error instanceof Error ? error.message : "Export failed.";
     appendExportLog(`Export failed: ${exportState.message}`);
-    activeExportTab = "log";
     showExportResultDialog("error");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
     return;
   }
 
@@ -4635,7 +4792,7 @@ async function exportCurrentSource(): Promise<void> {
     exportState.progress = 0;
     exportState.message = "Export canceled.";
     appendExportLog("Export canceled.");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
     return;
   }
 
@@ -4645,7 +4802,7 @@ async function exportCurrentSource(): Promise<void> {
     exportState.status = "running";
     exportState.message = `Saving ${formatExportLabel(commandPlan.format)}...`;
     appendExportLog(exportState.message);
-    renderExportUi();
+    showProcessingLogTab();
 
     if (saveTarget.kind === "native") {
       await writeBlobToFileHandle(saveTarget.handle, outputBlob);
@@ -4663,15 +4820,14 @@ async function exportCurrentSource(): Promise<void> {
     exportState.status = "done";
     exportState.progress = 1;
     showExportResultDialog("success");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
   } catch (error) {
     exportState.status = "error";
     exportState.progress = 0;
     exportState.message = error instanceof Error ? error.message : "Export failed.";
     appendExportLog(`Export failed: ${exportState.message}`);
-    activeExportTab = "log";
     showExportResultDialog("error");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
   }
 }
 
@@ -4704,9 +4860,8 @@ async function exportImageSequenceSource(
     exportState.progress = 0;
     exportState.message = error instanceof Error ? error.message : "Export failed.";
     appendExportLog(`Export failed: ${exportState.message}`);
-    activeExportTab = "log";
     showExportResultDialog("error");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
     return;
   }
 
@@ -4715,7 +4870,7 @@ async function exportImageSequenceSource(
     exportState.progress = 0;
     exportState.message = "Export canceled.";
     appendExportLog("Export canceled.");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
     return;
   }
 
@@ -4732,15 +4887,14 @@ async function exportImageSequenceSource(
       `Saved ${savedCount} ${formatExportLabel(commandPlan.format)} images to ${saveTarget.directoryName}.`;
     appendExportLog(exportState.message);
     showExportResultDialog("success");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
   } catch (error) {
     exportState.status = "error";
     exportState.progress = 0;
     exportState.message = error instanceof Error ? error.message : "Export failed.";
     appendExportLog(`Export failed: ${exportState.message}`);
-    activeExportTab = "log";
     showExportResultDialog("error");
-    renderExportUi();
+    showSettingsTabAfterProcessing();
   }
 }
 
@@ -4754,7 +4908,7 @@ async function runCanvasImageTransform(
   exportState.message = "Preparing source...";
   exportState.logs = [];
   appendExportLog(exportState.message);
-  renderExportUi();
+  showProcessingLogTab();
 
   const canvas = createEditedStaticFrameCanvas();
   exportState.progress = 0.72;
@@ -4781,7 +4935,7 @@ async function runFfmpegTransform(
   exportState.logs = [];
   appendExportLog(exportState.message);
   latestFfmpegLog = "";
-  renderExportUi();
+  showProcessingLogTab();
 
   let ffmpeg: FFmpeg | null = null;
   const workFiles = new Set<string>([commandPlan.outputName]);
@@ -4845,7 +4999,7 @@ async function runVideoImageSequenceExport(
   exportState.logs = [];
   appendExportLog(exportState.message);
   latestFfmpegLog = "";
-  renderExportUi();
+  showProcessingLogTab();
 
   let ffmpeg: FFmpeg | null = null;
   const outputDirectory = commandPlan.sequenceOutputDirectory;
@@ -4929,7 +5083,7 @@ async function runCanvasImageSequenceExport(
   exportState.message = "Preparing frames...";
   exportState.logs = [];
   appendExportLog(exportState.message);
-  renderExportUi();
+  showProcessingLogTab();
 
   const exportFrames = getFrameSequenceExportFrames(false);
 
@@ -5038,6 +5192,63 @@ function parseVideoFpsFromLogs(logs: string[]): number | null {
   }
 
   return findNumericLogValue(videoLines, /\b([0-9]+(?:\.[0-9]+)?)\s*tbr\b/);
+}
+
+function parseVideoMetadataFromFfmpegLogs(logs: string[]): VideoMetadata | null {
+  const duration = parseDurationFromFfmpegLogs(logs);
+  const size = parseVideoSizeFromFfmpegLogs(logs);
+
+  if (!duration || !size) {
+    return null;
+  }
+
+  return {
+    duration,
+    width: size.width,
+    height: size.height
+  };
+}
+
+function parseDurationFromFfmpegLogs(logs: string[]): number | null {
+  for (const line of logs) {
+    const match = line.match(/\bDuration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+
+    if (!match) {
+      continue;
+    }
+
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    const seconds = Number(match[3]);
+    const duration = hours * 3600 + minutes * 60 + seconds;
+
+    if (Number.isFinite(duration) && duration > 0) {
+      return roundTime(duration);
+    }
+  }
+
+  return null;
+}
+
+function parseVideoSizeFromFfmpegLogs(logs: string[]): { width: number; height: number } | null {
+  const videoLines = logs.filter((line) => /\bVideo:/.test(line));
+
+  for (let index = videoLines.length - 1; index >= 0; index -= 1) {
+    const match = videoLines[index].match(/\b([1-9]\d{1,5})x([1-9]\d{1,5})\b/);
+
+    if (!match) {
+      continue;
+    }
+
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { width, height };
+    }
+  }
+
+  return null;
 }
 
 function findNumericLogValue(lines: string[], pattern: RegExp): number | null {
@@ -5615,9 +5826,18 @@ function closeExportResultDialog(): void {
 
   exportResultDialog.hidden = true;
   exportResultDialog.setAttribute("aria-hidden", "true");
+  showSettingsTabAfterProcessing();
 
-  if (exportResultPreviousFocus && document.contains(exportResultPreviousFocus)) {
+  const previousPanel = exportResultPreviousFocus?.closest<HTMLElement>("[data-export-panel]");
+
+  if (
+    exportResultPreviousFocus &&
+    document.contains(exportResultPreviousFocus) &&
+    previousPanel?.dataset.exportPanel !== "log"
+  ) {
     exportResultPreviousFocus.focus();
+  } else {
+    exportTabButtons.find((button) => button.dataset.exportTab === "settings")?.focus();
   }
 
   exportResultPreviousFocus = null;
@@ -6311,6 +6531,34 @@ function getExportCropRect(): { x: number; y: number; width: number; height: num
   }
 
   return { x, y, width, height };
+}
+
+function setActiveExportTab(tab: "settings" | "log"): void {
+  exportTabSwitchRevision += 1;
+  activeExportTab = tab;
+  renderExportUi();
+}
+
+function showProcessingLogTab(): void {
+  setActiveExportTab("log");
+}
+
+function showSettingsTabAfterProcessing(): void {
+  const revision = exportTabSwitchRevision + 1;
+  exportTabSwitchRevision = revision;
+  const applySettingsTab = (): void => {
+    if (exportTabSwitchRevision !== revision) {
+      return;
+    }
+
+    activeExportTab = "settings";
+    renderExportUi();
+  };
+
+  applySettingsTab();
+  queueMicrotask(applySettingsTab);
+  window.requestAnimationFrame(applySettingsTab);
+  window.setTimeout(applySettingsTab, 120);
 }
 
 function renderExportUi(): void {
@@ -7037,6 +7285,7 @@ function resetSource(): void {
   state.fpsMode = "original";
   state.fpsValue = FPS_DEFAULT;
   state.audioMode = "keep";
+  state.compatibilityFallbackAllowed = false;
   state.thumbnailGenerationId += 1;
 
   fileInput.value = "";
