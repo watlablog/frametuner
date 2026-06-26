@@ -179,6 +179,7 @@ type LoadSourceOptions = {
   restoreSettings?: EditSettingsSnapshot;
   restoreFormat?: ExportFormat;
   skipGifPreprocess?: boolean;
+  skipCompatibilityFallback?: boolean;
 };
 
 type SourceLoadState = {
@@ -198,6 +199,8 @@ type SourceLoadController = {
   throwIfCanceled(): void;
   onCancel(callback: () => void): void;
 };
+
+type SourceCompatibilityDialogMode = "prompt" | "failure";
 
 type VideoMetadata = {
   duration: number;
@@ -410,6 +413,18 @@ const EXPORT_ICON = `
   </svg>
 `;
 
+const GITHUB_ICON = `
+  <svg class="social-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M12 2.3a9.7 9.7 0 0 0-3.1 18.9c.5.1.7-.2.7-.5v-1.8c-2.8.6-3.4-1.2-3.4-1.2-.4-1.1-1-1.4-1-1.4-.9-.6.1-.6.1-.6 1 0 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.8.8.1-.6.3-1.1.6-1.3-2.2-.3-4.5-1.1-4.5-4.8 0-1.1.4-1.9 1-2.6-.1-.3-.4-1.3.1-2.6 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 4.9 0c1.8-1.3 2.7-1 2.7-1 .5 1.3.2 2.3.1 2.6.6.7 1 1.5 1 2.6 0 3.8-2.3 4.6-4.5 4.8.4.3.7.9.7 1.8v2.7c0 .3.2.6.7.5A9.7 9.7 0 0 0 12 2.3Z" />
+  </svg>
+`;
+
+const X_ICON = `
+  <svg class="social-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M14 10.6 21.2 2h-2.5l-5.8 6.9L8.2 2H2.5l7.6 11.1L2.1 22h2.6l6.5-7.4 5 7.4H22l-8-11.4Zm-2 2.3-1.1-1.6L5.9 4h1.2l11.5 16h-1.2L12 12.9Z" />
+  </svg>
+`;
+
 const state: PreviewState = {
   sourceKind: "empty",
   sourceFile: null,
@@ -469,6 +484,31 @@ root.innerHTML = `
         </div>
         <p class="app-copy">Browser-based video trimming and tuning tool.</p>
       </div>
+      <nav class="project-links" aria-label="Project links">
+        <span class="project-links-message">Requests and bug reports are welcome here.</span>
+        <a
+          class="project-link"
+          href="https://github.com/watlablog/frametuner"
+          target="_blank"
+          rel="noreferrer noopener"
+          aria-label="Open watlablog/frametuner on GitHub"
+          title="watlablog/frametuner"
+        >
+          ${GITHUB_ICON}
+          <span>GitHub</span>
+        </a>
+        <a
+          class="project-link"
+          href="https://x.com/watlablog/"
+          target="_blank"
+          rel="noreferrer noopener"
+          aria-label="Open watlablog on X"
+          title="watlablog on X"
+        >
+          ${X_ICON}
+          <span>X</span>
+        </a>
+      </nav>
     </header>
 
     <main class="workspace" aria-label="FrameTuner workspace">
@@ -990,6 +1030,27 @@ root.innerHTML = `
       <button class="button" type="button" data-export-result-close>OK</button>
     </section>
   </div>
+
+  <div class="source-compat-backdrop" data-source-compat-dialog aria-hidden="true" hidden>
+    <section
+      class="source-compat-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="source-compat-title"
+      aria-describedby="source-compat-detail"
+    >
+      <span class="section-kicker" data-source-compat-kicker>Compatibility</span>
+      <h2 id="source-compat-title" data-source-compat-title>Unsupported browser video</h2>
+      <p id="source-compat-detail" data-source-compat-detail>
+        This video format is not supported by your browser. Convert it to a browser-compatible MP4 and load it?
+      </p>
+      <div class="source-compat-actions">
+        <button class="button" type="button" data-source-compat-cancel>Cancel</button>
+        <button class="button primary" type="button" data-source-compat-convert>Convert</button>
+        <button class="button primary" type="button" data-source-compat-close hidden>OK</button>
+      </div>
+    </section>
+  </div>
 `;
 
 const fileInput = query<HTMLInputElement>("#source-file");
@@ -1083,6 +1144,13 @@ const exportResultTitle = query<HTMLElement>("[data-export-result-title]");
 const exportResultDetail = query<HTMLElement>("[data-export-result-detail]");
 const exportResultDownload = query<HTMLAnchorElement>("[data-export-result-download]");
 const exportResultCloseButton = query<HTMLButtonElement>("[data-export-result-close]");
+const sourceCompatibilityDialog = query<HTMLDivElement>("[data-source-compat-dialog]");
+const sourceCompatibilityKicker = query<HTMLElement>("[data-source-compat-kicker]");
+const sourceCompatibilityTitle = query<HTMLElement>("[data-source-compat-title]");
+const sourceCompatibilityDetail = query<HTMLElement>("[data-source-compat-detail]");
+const sourceCompatibilityCancelButton = query<HTMLButtonElement>("[data-source-compat-cancel]");
+const sourceCompatibilityConvertButton = query<HTMLButtonElement>("[data-source-compat-convert]");
+const sourceCompatibilityCloseButton = query<HTMLButtonElement>("[data-source-compat-close]");
 let trimFilmstripHideTimer: number | null = null;
 let cropDragSession: CropDragSession | null = null;
 let gifPlaybackTimer: number | null = null;
@@ -1094,6 +1162,10 @@ let gifPreprocessGenerationId = 0;
 let exportWarningDialogResolve: ((confirmed: boolean) => void) | null = null;
 let exportWarningPreviousFocus: HTMLElement | null = null;
 let exportResultPreviousFocus: HTMLElement | null = null;
+let sourceCompatibilityDialogResolve: ((confirmed: boolean) => void) | null = null;
+let sourceCompatibilityPreviousFocus: HTMLElement | null = null;
+let sourceCompatibilityDialogMode: SourceCompatibilityDialogMode = "prompt";
+let sourceCompatibilityConversionController: SourceLoadController | null = null;
 let sourceLoadCancelCallbacks: Array<() => void> = [];
 const sourceLoadState: SourceLoadState = {
   active: false,
@@ -1347,6 +1419,21 @@ exportResultDialog.addEventListener("click", (event) => {
   }
 });
 exportResultDialog.addEventListener("keydown", handleExportResultDialogKeydown);
+sourceCompatibilityCancelButton.addEventListener("click", () => {
+  closeSourceCompatibilityDialog(false);
+});
+sourceCompatibilityConvertButton.addEventListener("click", () => {
+  closeSourceCompatibilityDialog(true);
+});
+sourceCompatibilityCloseButton.addEventListener("click", () => {
+  closeSourceCompatibilityDialog(false);
+});
+sourceCompatibilityDialog.addEventListener("click", (event) => {
+  if (event.target === sourceCompatibilityDialog) {
+    closeSourceCompatibilityDialog(false);
+  }
+});
+sourceCompatibilityDialog.addEventListener("keydown", handleSourceCompatibilityDialogKeydown);
 
 for (const button of resetSourceButtons) {
   button.addEventListener("click", resetSource);
@@ -1380,12 +1467,20 @@ class SourceLoadCanceledError extends Error {
   }
 }
 
+class BrowserVideoPreviewError extends Error {
+  constructor(message = "Video metadata could not be loaded by the browser.") {
+    super(message);
+    this.name = "BrowserVideoPreviewError";
+  }
+}
+
 function startSourceLoadDialog(message: string): SourceLoadController {
   if (sourceLoadState.active) {
     runSourceLoadCancelCallbacks();
   }
 
   closeGifPreprocessDialog(null);
+  closeSourceCompatibilityDialog(false);
   gifPreprocessGenerationId += 1;
   sourceLoadCancelCallbacks = [];
   sourceLoadState.active = true;
@@ -1520,6 +1615,94 @@ function handleSourceLoadDialogKeydown(event: KeyboardEvent): void {
     return;
   }
 
+  const currentIndex = focusableElements.indexOf(document.activeElement as HTMLElement);
+  const direction = event.shiftKey ? -1 : 1;
+  const nextIndex =
+    currentIndex === -1
+      ? 0
+      : (currentIndex + direction + focusableElements.length) % focusableElements.length;
+
+  event.preventDefault();
+  focusableElements[nextIndex].focus();
+}
+
+function showSourceCompatibilityPromptDialog(): Promise<boolean> {
+  return showSourceCompatibilityDialog("prompt");
+}
+
+function showSourceCompatibilityFailureDialog(): void {
+  void showSourceCompatibilityDialog("failure");
+}
+
+function showSourceCompatibilityDialog(mode: SourceCompatibilityDialogMode): Promise<boolean> {
+  if (sourceCompatibilityDialogResolve) {
+    return Promise.resolve(false);
+  }
+
+  sourceCompatibilityDialogMode = mode;
+  sourceCompatibilityKicker.textContent = mode === "prompt" ? "Compatibility" : "Conversion";
+  sourceCompatibilityTitle.textContent =
+    mode === "prompt" ? "Unsupported browser video" : "Conversion failed";
+  sourceCompatibilityDetail.textContent =
+    mode === "prompt"
+      ? "This video format is not supported by your browser. Convert it to a browser-compatible MP4 and load it?"
+      : "The video could not be converted. Check the Log tab for details.";
+  sourceCompatibilityCancelButton.hidden = mode !== "prompt";
+  sourceCompatibilityConvertButton.hidden = mode !== "prompt";
+  sourceCompatibilityCloseButton.hidden = mode !== "failure";
+  sourceCompatibilityPreviousFocus =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  sourceCompatibilityDialog.hidden = false;
+  sourceCompatibilityDialog.setAttribute("aria-hidden", "false");
+
+  return new Promise((resolve) => {
+    sourceCompatibilityDialogResolve = (confirmed) => {
+      sourceCompatibilityDialog.hidden = true;
+      sourceCompatibilityDialog.setAttribute("aria-hidden", "true");
+      sourceCompatibilityDialogResolve = null;
+      resolve(confirmed);
+
+      if (
+        sourceCompatibilityPreviousFocus &&
+        document.contains(sourceCompatibilityPreviousFocus)
+      ) {
+        sourceCompatibilityPreviousFocus.focus();
+      }
+
+      sourceCompatibilityPreviousFocus = null;
+    };
+
+    if (mode === "prompt") {
+      sourceCompatibilityCancelButton.focus();
+    } else {
+      sourceCompatibilityCloseButton.focus();
+    }
+  });
+}
+
+function closeSourceCompatibilityDialog(confirmed: boolean): void {
+  sourceCompatibilityDialogResolve?.(confirmed);
+}
+
+function handleSourceCompatibilityDialogKeydown(event: KeyboardEvent): void {
+  if (!sourceCompatibilityDialogResolve) {
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSourceCompatibilityDialog(false);
+    return;
+  }
+
+  if (event.key !== "Tab") {
+    return;
+  }
+
+  const focusableElements: HTMLElement[] =
+    sourceCompatibilityDialogMode === "prompt"
+      ? [sourceCompatibilityCancelButton, sourceCompatibilityConvertButton]
+      : [sourceCompatibilityCloseButton];
   const currentIndex = focusableElements.indexOf(document.activeElement as HTMLElement);
   const direction = event.shiftKey ? -1 : 1;
   const nextIndex =
@@ -1676,8 +1859,46 @@ async function loadSourceFileWithProgress(file: File, options: LoadSourceOptions
     beginSourceLoad(file, options, null, false, null, metadata);
     closeSourceLoadDialog(controller.generationId);
   } catch (error) {
+    if (error instanceof BrowserVideoPreviewError && !options.skipCompatibilityFallback) {
+      await handleBrowserVideoPreviewFailure(file, options, controller, error);
+      return;
+    }
+
     handleSourceLoadFailure(error, controller, "Source could not be loaded.");
   }
+}
+
+async function handleBrowserVideoPreviewFailure(
+  file: File,
+  options: LoadSourceOptions,
+  controller: SourceLoadController,
+  error: BrowserVideoPreviewError
+): Promise<void> {
+  if (controller.isCanceled()) {
+    fileInput.value = "";
+    closeSourceLoadDialog(controller.generationId);
+    return;
+  }
+
+  closeSourceLoadDialog(controller.generationId);
+  appendExportLog("Browser preview failed for the original video.");
+  appendExportLog(`Load failed: ${error.message}`);
+  activeExportTab = "log";
+  renderExportUi();
+
+  const shouldConvert = await showSourceCompatibilityPromptDialog();
+
+  if (!shouldConvert) {
+    fileInput.value = "";
+
+    if (!state.sourceFile) {
+      handlePreviewLoadFailure();
+    }
+
+    return;
+  }
+
+  await convertAndLoadBrowserCompatibleVideo(file, options);
 }
 
 function handleSourceLoadFailure(
@@ -1704,6 +1925,131 @@ function handleSourceLoadFailure(
   appendExportLog(`Load failed: ${message}`);
   activeExportTab = "log";
   renderExportUi();
+}
+
+async function convertAndLoadBrowserCompatibleVideo(
+  file: File,
+  options: LoadSourceOptions
+): Promise<void> {
+  const controller = startSourceLoadDialog("Loading FFmpeg...");
+  const inputName = `compat_input.${getFileExtension(file.name)}`;
+  const outputName = "compat_output.mp4";
+  const workFiles = new Set<string>([inputName, outputName]);
+  let ffmpeg: FFmpeg | null = null;
+
+  appendExportLog("Converting source to browser-compatible MP4.");
+  activeExportTab = "log";
+  renderExportUi();
+
+  controller.onCancel(() => {
+    if (ffmpeg) {
+      ffmpeg.terminate();
+      ffmpegInstance = null;
+      ffmpegLoadPromise = null;
+    }
+  });
+
+  try {
+    latestFfmpegLog = "";
+    sourceCompatibilityConversionController = controller;
+    controller.update("Loading FFmpeg...", 0.04);
+    ffmpeg = await getLoadedFfmpeg();
+    controller.throwIfCanceled();
+
+    const { fetchFile } = await import("@ffmpeg/util");
+    controller.update("Preparing source for conversion...", 0.1);
+    await ffmpeg.writeFile(inputName, await fetchFile(file));
+    controller.throwIfCanceled();
+
+    controller.update("Converting video for browser preview...", 0.16);
+    const exitCode = await ffmpeg.exec(buildBrowserCompatibleVideoArgs(inputName, outputName));
+
+    if (exitCode !== 0) {
+      throw new Error(latestFfmpegLog || `FFmpeg exited with code ${exitCode}.`);
+    }
+
+    controller.throwIfCanceled();
+    controller.update("Preparing preview...", 0.9);
+    const convertedFileData = await ffmpeg.readFile(outputName);
+    const convertedBytes = typeof convertedFileData === "string"
+      ? new TextEncoder().encode(convertedFileData)
+      : convertedFileData;
+    const outputBytes = new Uint8Array(convertedBytes.byteLength);
+    outputBytes.set(convertedBytes);
+    const convertedBlob = new Blob([outputBytes.buffer], { type: getExportMimeType("mp4") });
+    const convertedFile = createBrowserCompatibleVideoFile(file.name, convertedBlob);
+    const metadata = await loadVideoMetadata(convertedFile, controller);
+
+    controller.throwIfCanceled();
+    controller.update("Preparing preview...", 0.96);
+    appendExportLog("Compatibility conversion complete.");
+    const conversionLogs = [...exportState.logs];
+    beginSourceLoad(
+      convertedFile,
+      {
+        ...options,
+        skipCompatibilityFallback: true
+      },
+      null,
+      false,
+      null,
+      metadata
+    );
+    exportState.logs = conversionLogs;
+    activeExportTab = "log";
+    renderExportUi();
+    closeSourceLoadDialog(controller.generationId);
+  } catch (error) {
+    if (controller.isCanceled() || isSourceLoadCanceledError(error)) {
+      fileInput.value = "";
+
+      if (!state.sourceFile) {
+        handlePreviewLoadFailure();
+      }
+
+      closeSourceLoadDialog(controller.generationId);
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : "Conversion failed.";
+    appendExportLog(`Compatibility conversion failed: ${message}`);
+    activeExportTab = "log";
+    fileInput.value = "";
+    closeSourceLoadDialog(controller.generationId);
+
+    if (!state.sourceFile) {
+      handlePreviewLoadFailure();
+    }
+
+    showSourceCompatibilityFailureDialog();
+    renderExportUi();
+  } finally {
+    sourceCompatibilityConversionController = null;
+
+    if (ffmpeg && !controller.isCanceled()) {
+      await safeDeleteFfmpegFiles(ffmpeg, Array.from(workFiles));
+    }
+  }
+}
+
+function buildBrowserCompatibleVideoArgs(inputName: string, outputName: string): string[] {
+  return [
+    "-y",
+    "-i", inputName,
+    "-map", "0:v:0",
+    "-map", "0:a:0?",
+    "-dn",
+    "-sn",
+    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "23",
+    "-pix_fmt", "yuv420p",
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-movflags", "+faststart",
+    outputName
+  ];
 }
 
 function loadSourceFile(file: File, options: LoadSourceOptions = {}): void {
@@ -2724,7 +3070,7 @@ function loadVideoMetadata(file: File, controller: SourceLoadController): Promis
     let settled = false;
     const timeoutId = window.setTimeout(() => {
       settle(() => {
-        reject(new Error("Video metadata timed out."));
+        reject(new BrowserVideoPreviewError("Video metadata timed out in the browser."));
       });
     }, VIDEO_METADATA_LOAD_TIMEOUT_MS);
 
@@ -2761,7 +3107,7 @@ function loadVideoMetadata(file: File, controller: SourceLoadController): Promis
     };
     const handleError = (): void => {
       settle(() => {
-        reject(new Error("Video metadata could not be loaded."));
+        reject(new BrowserVideoPreviewError());
       });
     };
 
@@ -5503,6 +5849,15 @@ function handleFfmpegLog(event: LogEvent): void {
 }
 
 function handleFfmpegProgress(event: ProgressEvent): void {
+  if (sourceCompatibilityConversionController) {
+    const progress = 0.16 + clamp(event.progress, 0, 1) * 0.72;
+    sourceCompatibilityConversionController.update(
+      "Converting video for browser preview...",
+      Math.min(0.88, Math.max(sourceLoadState.progress, progress))
+    );
+    return;
+  }
+
   if (exportState.status !== "running") {
     return;
   }
@@ -6193,6 +6548,14 @@ function createAssignedFile(sourceFileName: string, blob: Blob, format: ExportFo
   });
 }
 
+function createBrowserCompatibleVideoFile(sourceFileName: string, blob: Blob): File {
+  const baseName = sourceFileName.replace(/\.[^/.]+$/, "") || "video";
+  return new File([blob], `${baseName}_compatible.mp4`, {
+    type: getExportMimeType("mp4"),
+    lastModified: Date.now()
+  });
+}
+
 function getExportFileExtension(format: ExportFormat): string {
   return format === "jpeg" ? "jpg" : format;
 }
@@ -6644,6 +7007,7 @@ function resetSource(): void {
   cancelSourceLoad();
   gifPreprocessGenerationId += 1;
   closeGifPreprocessDialog(null);
+  closeSourceCompatibilityDialog(false);
   assignCheckpoint = null;
   pendingSettingsRestore = null;
   revokeSourceUrl();

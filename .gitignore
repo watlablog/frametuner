@@ -1,6 +1,7 @@
 node_modules/
 dist/
 public/ffmpeg/
+sample/
 .DS_Store
 *.log
 DESIGN*.md
