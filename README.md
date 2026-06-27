@@ -12,6 +12,7 @@ The app runs locally in the browser. Video conversion is handled by `ffmpeg.wasm
 - Crop with preset aspect ratios or a free rectangle.
 - Resize to the original size or a custom size.
 - Change FPS as a speed change while preserving frame count.
+- Add telop text overlays to the preview and supported outputs.
 - Remove audio from MP4 output.
 - Export videos as MP4, GIF, WAV, or image sequences.
 - Export GIFs as GIF, MP4, or image sequences.
@@ -80,6 +81,29 @@ FPS changes are treated as speed changes.
 - For video MP4 output, audio is time-stretched when audio is kept.
 - FPS changes do not affect PNG, JPEG, or BMP image sequence exports because image sequences do not store timing.
 - FPS controls are disabled for still images and single-frame sources.
+
+## Telop
+
+Use the **Telop** tab to add timed text overlays.
+
+- Move the preview seek bar to the time where the text should appear.
+- Enter the text and duration.
+- Adjust outline, fill color, outline color, font size, and position.
+- Click **Insert** to add the telop to the list.
+- During playback, each telop appears only during its configured time range.
+
+Telops are stored as a timeline list.
+
+- The list is sorted by start time.
+- Click a list item to load that telop into the form.
+- After selecting a telop, use **Use current time** to replace its start time with the current seek position.
+- Use **Update** to save changes to the selected telop.
+- Use **Remove** to delete the selected telop.
+- When no telop is selected, **Insert** is enabled and **Update** / **Remove** are disabled.
+
+Position can be left at the default lower-left placement, or changed to **Custom** to enter X and Y percentages. Long text wraps in the preview and is approximated when burned into exported frames.
+
+Telop overlays are included in supported **Assign** and **Export** outputs. After **Assign**, the telops are burned into the assigned media and the telop list is cleared with the rest of the edit settings.
 
 ## Output
 
@@ -185,3 +209,34 @@ npm run preview
 ```
 
 The `dev`, `build`, and `preview` scripts prepare the local FFmpeg core files before running Vite.
+
+## Release Notes
+
+### 1.0.4
+
+- Added the Telop tab for inserting timed text overlays in the preview.
+- Burn telop overlays into supported Assign and Export outputs.
+- Improved FFmpeg progress tracking so the progress bar follows logged output time more closely.
+
+### 1.0.3
+
+- Added GitHub and X links for requests and bug reports.
+- Improved unsupported video conversion handling and logging.
+- Moved Output controls outside the Settings/Log tab panels so export controls remain visible.
+- Switched long-running operations to the Log tab while processing, then back to Settings afterward.
+
+### 1.0.2
+
+- Added browser-incompatible video fallback conversion to MP4 using local `ffmpeg.wasm`.
+- Added clearer conversion failure messaging and Log tab details.
+
+### 1.0.1
+
+- Added WAV audio export for videos with audio streams.
+- Added the visible app version next to the FrameTuner title.
+- Expanded the README with usage documentation.
+
+### 1.0.0
+
+- Initial stable release with local browser-based editing.
+- Included video/GIF/image import, Trim, Crop, Resize, FPS speed changes, Assign/Reset, MP4/GIF/image sequence export, GIF frame preprocessing, image sequence import, and local FFmpeg support.

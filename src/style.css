@@ -408,6 +408,47 @@ p {
   display: block;
 }
 
+.telop-overlay {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.telop-text {
+  position: absolute;
+  left: var(--telop-x, 5%);
+  top: var(--telop-y, 92%);
+  width: var(--telop-width, 90%);
+  max-width: 90%;
+  color: var(--telop-fill, #ffffff);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: var(--telop-size, 7%);
+  font-weight: 800;
+  line-height: 1.22;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+  transform: none;
+}
+
+.telop-text.is-default-position {
+  top: auto;
+  bottom: 5%;
+}
+
+.telop-text.has-outline {
+  -webkit-text-stroke: max(1px, 0.08em) var(--telop-stroke, #020913);
+  paint-order: stroke fill;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.48),
+    1px 0 var(--telop-stroke, #020913),
+    -1px 0 var(--telop-stroke, #020913),
+    0 1px var(--telop-stroke, #020913),
+    0 -1px var(--telop-stroke, #020913);
+}
+
 .crop-overlay {
   position: absolute;
   inset: 0;
@@ -1462,7 +1503,7 @@ input:disabled {
 
 .export-tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 5px;
   border: 1px solid rgba(141, 189, 255, 0.16);
   border-radius: 10px;
@@ -1514,6 +1555,201 @@ input:disabled {
   overflow: auto;
   overflow-x: hidden;
   padding-right: 1px;
+}
+
+.telop-tab-panel {
+  min-height: 0;
+  overflow: auto;
+  overflow-x: hidden;
+  padding-right: 1px;
+}
+
+.telop-panel {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+}
+
+.telop-heading {
+  display: flex;
+  min-width: 0;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.telop-heading h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.1;
+}
+
+.telop-heading p,
+.telop-heading > span {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.telop-time-button {
+  min-height: 29px;
+  margin-top: 6px;
+  padding: 5px 10px;
+  font-size: 0.74rem;
+}
+
+.telop-text-field,
+.telop-inline-grid label,
+.telop-style-grid label,
+.telop-custom-fields label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.telop-text-field textarea,
+.telop-inline-grid input,
+.telop-style-grid input[type="color"],
+.telop-custom-fields input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(141, 189, 255, 0.22);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.telop-text-field textarea {
+  min-height: 70px;
+  max-height: 120px;
+  resize: vertical;
+  padding: 8px 9px;
+  line-height: 1.35;
+}
+
+.telop-inline-grid,
+.telop-style-grid,
+.telop-custom-fields,
+.telop-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.telop-style-grid {
+  grid-template-columns: minmax(74px, 0.8fr) repeat(2, minmax(0, 1fr));
+}
+
+.telop-inline-grid input,
+.telop-custom-fields input {
+  min-height: 31px;
+  padding: 6px 8px;
+}
+
+.telop-style-grid input[type="color"] {
+  min-height: 31px;
+  padding: 3px;
+}
+
+.telop-check {
+  align-content: end;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.telop-check input {
+  width: 16px;
+  height: 16px;
+}
+
+.telop-position-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.telop-position-button {
+  min-width: 0;
+  min-height: 30px;
+  border: 1px solid rgba(141, 189, 255, 0.18);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(6, 18, 34, 0.62);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.telop-position-button.is-selected {
+  color: #ffffff;
+  border-color: rgba(78, 166, 255, 0.48);
+  background: rgba(78, 166, 255, 0.18);
+}
+
+.telop-custom-fields.is-disabled {
+  opacity: 0.58;
+}
+
+.telop-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.telop-list {
+  display: grid;
+  gap: 6px;
+  min-height: 82px;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid rgba(141, 189, 255, 0.16);
+  border-radius: 10px;
+  padding: 6px;
+  background: rgba(3, 11, 22, 0.42);
+}
+
+.telop-empty {
+  margin: 0;
+  align-self: center;
+  color: rgba(166, 180, 199, 0.7);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.telop-list-item {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid rgba(141, 189, 255, 0.14);
+  border-radius: 8px;
+  padding: 7px 8px;
+  color: var(--text);
+  background: rgba(8, 22, 42, 0.58);
+  text-align: left;
+  cursor: pointer;
+}
+
+.telop-list-item.is-selected {
+  border-color: rgba(78, 166, 255, 0.55);
+  background: rgba(78, 166, 255, 0.18);
+}
+
+.telop-list-time {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
+.telop-list-item strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.78rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .log-tab-panel {
@@ -2051,6 +2287,7 @@ input:disabled {
   }
 
   .setting-tab-panel,
+  .telop-tab-panel,
   .log-tab-panel {
     overflow: visible;
   }
@@ -2287,6 +2524,17 @@ input:disabled {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: 6px;
+  }
+
+  .telop-inline-grid,
+  .telop-style-grid,
+  .telop-custom-fields,
+  .telop-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .telop-list {
+    max-height: 220px;
   }
 
   .trim-panel,

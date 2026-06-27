@@ -30,6 +30,9 @@ type PreviewState = {
   fpsMode: FpsMode;
   fpsValue: number;
   audioMode: AudioMode;
+  telops: TelopItem[];
+  selectedTelopId: string | null;
+  telopDraftStartTime: number;
   thumbnailDataUrls: string[];
   thumbnailGenerationId: number;
   activeTrimEdge: TrimEdge | null;
@@ -43,9 +46,25 @@ type CropHandle = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 type ResizeMode = "original" | "custom";
 type FpsMode = "original" | "custom";
 type AudioMode = "keep" | "remove";
+type TelopPositionMode = "default" | "custom";
 type ExportFormat = "mp4" | "gif" | "png" | "jpeg" | "bmp" | "wav";
 type ImageSequenceFormat = "png" | "jpeg" | "bmp";
 type ExportJobStatus = "idle" | "loading-ffmpeg" | "running" | "done" | "error";
+
+type TelopItem = {
+  id: string;
+  text: string;
+  startTime: number;
+  duration: number;
+  outlineEnabled: boolean;
+  fillColor: string;
+  strokeColor: string;
+  fontSizePercent: number;
+  positionMode: TelopPositionMode;
+  xPercent: number;
+  yPercent: number;
+  createdOrder: number;
+};
 
 type GifFrame = {
   canvas: HTMLCanvasElement;
@@ -144,6 +163,8 @@ type ExportCommandPlan = {
   saveAccept: Record<string, string[]>;
   args: string[];
   sequenceOutputDirectory?: string;
+  videoTelopOverlays?: VideoTelopOverlayInput[];
+  progressDurationSeconds?: number;
   buildArgsWithVideoProbe?: (probe: VideoSourceProbe) => string[];
 };
 
@@ -160,6 +181,7 @@ type EditSettingsSnapshot = {
   fpsMode: FpsMode;
   fpsValue: number;
   audioMode: AudioMode;
+  telops: TelopItem[];
 };
 
 type AssignCheckpoint = {
@@ -231,6 +253,7 @@ type GifExportSizeEstimate = {
 type CanvasExportFrame = {
   canvas: HTMLCanvasElement;
   duration: number;
+  time: number;
 };
 
 type GifExportGeometry = {
@@ -242,6 +265,19 @@ type GifExportGeometry = {
   };
   outputWidth: number;
   outputHeight: number;
+};
+
+type VideoTelopOverlayInput = {
+  inputName: string;
+  canvas: HTMLCanvasElement;
+  startTime: number;
+  endTime: number;
+};
+
+type FfmpegProgressContext = {
+  targetDurationSeconds: number | null;
+  startProgress: number;
+  endProgress: number;
 };
 
 type FileSystemWritableFileStreamLike = {
@@ -336,6 +372,16 @@ const GIF_ESTIMATE_VIDEO_FPS = 30;
 const VIDEO_SOURCE_FPS_FALLBACK = 30;
 const GIF_EXPORT_WARNING_BYTES = 64 * 1024 * 1024;
 const EXPORT_LOG_MAX_LINES = 240;
+const TELOP_DEFAULT_DURATION = 3;
+const TELOP_MIN_DURATION = 0.1;
+const TELOP_MAX_DURATION = 999;
+const TELOP_DEFAULT_FILL_COLOR = "#ffffff";
+const TELOP_DEFAULT_STROKE_COLOR = "#020913";
+const TELOP_DEFAULT_FONT_SIZE_PERCENT = 7;
+const TELOP_MIN_FONT_SIZE_PERCENT = 2;
+const TELOP_MAX_FONT_SIZE_PERCENT = 20;
+const TELOP_DEFAULT_X_PERCENT = 5;
+const TELOP_DEFAULT_Y_PERCENT = 92;
 const GIF_EXPORT_WARNING_MESSAGE =
   "This GIF conversion may be large and could fail. Reduce the output size with Resize or shorten the Trim range before converting.";
 const DEFAULT_CROP_RECT: CropRect = {
@@ -451,6 +497,9 @@ const state: PreviewState = {
   fpsMode: "original",
   fpsValue: FPS_DEFAULT,
   audioMode: "keep",
+  telops: [],
+  selectedTelopId: null,
+  telopDraftStartTime: 0,
   thumbnailDataUrls: [],
   thumbnailGenerationId: 0,
   activeTrimEdge: null,
@@ -563,6 +612,7 @@ root.innerHTML = `
                 <span class="crop-handle crop-handle-se" data-crop-handle="se" aria-hidden="true"></span>
               </div>
             </div>
+            <div class="telop-overlay" data-telop-overlay aria-hidden="true"></div>
           </div>
           <div class="video-placeholder" data-video-placeholder>
             <span class="preview-monogram" aria-hidden="true">FT</span>
@@ -616,6 +666,17 @@ root.innerHTML = `
             data-export-tab="settings"
           >
             Settings
+          </button>
+          <button
+            class="export-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="export-telop-panel"
+            id="export-telop-tab"
+            data-export-tab="telop"
+          >
+            Telop
           </button>
           <button
             class="export-tab"
@@ -829,6 +890,98 @@ root.innerHTML = `
               </label>
             </section>
           </div>
+        </div>
+
+        <div
+          class="export-tab-panel telop-tab-panel is-hidden"
+          id="export-telop-panel"
+          role="tabpanel"
+          aria-labelledby="export-telop-tab"
+          data-export-panel="telop"
+        >
+          <section class="telop-panel" aria-labelledby="telop-title">
+            <div class="telop-heading">
+              <div>
+                <h3 id="telop-title">Telop</h3>
+                <p data-telop-start-summary>Start 0:00.0</p>
+                <button class="button compact-button telop-time-button" type="button" data-telop-use-current disabled>Use current time</button>
+              </div>
+              <span data-telop-count>0 items</span>
+            </div>
+
+            <label class="telop-text-field">
+              <span>Text</span>
+              <textarea rows="3" maxlength="240" placeholder="Enter telop text" data-telop-text disabled></textarea>
+            </label>
+
+            <div class="telop-inline-grid">
+              <label>
+                <span>Duration</span>
+                <input
+                  type="number"
+                  min="${TELOP_MIN_DURATION}"
+                  max="${TELOP_MAX_DURATION}"
+                  value="${TELOP_DEFAULT_DURATION}"
+                  step="0.1"
+                  inputmode="decimal"
+                  data-telop-duration
+                  disabled
+                />
+              </label>
+              <label>
+                <span>Font size</span>
+                <input
+                  type="number"
+                  min="${TELOP_MIN_FONT_SIZE_PERCENT}"
+                  max="${TELOP_MAX_FONT_SIZE_PERCENT}"
+                  value="${TELOP_DEFAULT_FONT_SIZE_PERCENT}"
+                  step="0.5"
+                  inputmode="decimal"
+                  data-telop-font-size
+                  disabled
+                />
+              </label>
+            </div>
+
+            <div class="telop-style-grid">
+              <label class="telop-check">
+                <input type="checkbox" data-telop-outline checked disabled />
+                <span>Outline</span>
+              </label>
+              <label>
+                <span>Fill</span>
+                <input type="color" value="${TELOP_DEFAULT_FILL_COLOR}" data-telop-fill disabled />
+              </label>
+              <label>
+                <span>Outline color</span>
+                <input type="color" value="${TELOP_DEFAULT_STROKE_COLOR}" data-telop-stroke disabled />
+              </label>
+            </div>
+
+            <div class="telop-position-row" role="group" aria-label="Telop position">
+              <button class="telop-position-button is-selected" type="button" data-telop-position="default" disabled>Default</button>
+              <button class="telop-position-button" type="button" data-telop-position="custom" disabled>Custom</button>
+            </div>
+
+            <div class="telop-custom-fields" data-telop-custom-fields>
+              <label>
+                <span>X %</span>
+                <input type="number" min="0" max="100" value="${TELOP_DEFAULT_X_PERCENT}" step="1" data-telop-x disabled />
+              </label>
+              <label>
+                <span>Y %</span>
+                <input type="number" min="0" max="100" value="${TELOP_DEFAULT_Y_PERCENT}" step="1" data-telop-y disabled />
+              </label>
+            </div>
+
+            <div class="telop-actions">
+              <button class="button primary" type="button" data-telop-insert disabled>Insert</button>
+              <button class="button" type="button" data-telop-update disabled>Update</button>
+              <button class="button" type="button" data-telop-remove disabled>Remove</button>
+            </div>
+
+            <div class="telop-list" data-telop-list role="listbox" aria-label="Telop settings"></div>
+          </section>
         </div>
 
         <div
@@ -1085,6 +1238,7 @@ const trimActiveLabel = query<HTMLElement>("[data-trim-active-label]");
 const trimActiveTime = query<HTMLElement>("[data-trim-active-time]");
 const cropOverlay = query<HTMLDivElement>("[data-crop-overlay]");
 const cropBox = query<HTMLDivElement>("[data-crop-box]");
+const telopOverlay = query<HTMLDivElement>("[data-telop-overlay]");
 const cropSummary = query<HTMLElement>("[data-crop-summary]");
 const cropSizeInput = query<HTMLInputElement>("[data-crop-size]");
 const freeSizeFields = query<HTMLDivElement>("[data-free-size-fields]");
@@ -1101,6 +1255,23 @@ const controlGrid = query<HTMLDivElement>(".control-grid");
 const fpsSummary = query<HTMLElement>("[data-fps-summary]");
 const fpsModeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-fps-mode]"));
 const fpsValueInput = query<HTMLInputElement>("[data-fps-value]");
+const telopStartSummary = query<HTMLElement>("[data-telop-start-summary]");
+const telopCount = query<HTMLElement>("[data-telop-count]");
+const telopTextInput = query<HTMLTextAreaElement>("[data-telop-text]");
+const telopDurationInput = query<HTMLInputElement>("[data-telop-duration]");
+const telopFontSizeInput = query<HTMLInputElement>("[data-telop-font-size]");
+const telopOutlineInput = query<HTMLInputElement>("[data-telop-outline]");
+const telopFillInput = query<HTMLInputElement>("[data-telop-fill]");
+const telopStrokeInput = query<HTMLInputElement>("[data-telop-stroke]");
+const telopPositionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-telop-position]"));
+const telopCustomFields = query<HTMLDivElement>("[data-telop-custom-fields]");
+const telopXInput = query<HTMLInputElement>("[data-telop-x]");
+const telopYInput = query<HTMLInputElement>("[data-telop-y]");
+const telopUseCurrentButton = query<HTMLButtonElement>("[data-telop-use-current]");
+const telopInsertButton = query<HTMLButtonElement>("[data-telop-insert]");
+const telopUpdateButton = query<HTMLButtonElement>("[data-telop-update]");
+const telopRemoveButton = query<HTMLButtonElement>("[data-telop-remove]");
+const telopList = query<HTMLDivElement>("[data-telop-list]");
 const exportStatus = query<HTMLElement>("[data-export-status]");
 const exportFormatSelect = query<HTMLSelectElement>("[data-export-format]");
 const exportAudioSelect = query<HTMLSelectElement>("[data-export-audio]");
@@ -1159,8 +1330,10 @@ let gifPlaybackTimer: number | null = null;
 let ffmpegInstance: FFmpeg | null = null;
 let ffmpegLoadPromise: Promise<FFmpeg> | null = null;
 let latestFfmpegLog = "";
-let activeExportTab: "settings" | "log" = "settings";
+let ffmpegProgressContext: FfmpegProgressContext | null = null;
+let activeExportTab: "settings" | "telop" | "log" = "settings";
 let exportTabSwitchRevision = 0;
+let telopNextOrder = 0;
 let gifPreprocessGenerationId = 0;
 let exportWarningDialogResolve: ((confirmed: boolean) => void) | null = null;
 let exportWarningPreviousFocus: HTMLElement | null = null;
@@ -1341,6 +1514,28 @@ for (const button of fpsModeButtons) {
 }
 
 fpsValueInput.addEventListener("change", applyFpsValueFromInput);
+telopTextInput.addEventListener("input", renderTelopUi);
+telopDurationInput.addEventListener("input", renderTelopUi);
+telopFontSizeInput.addEventListener("input", renderTelopUi);
+telopOutlineInput.addEventListener("change", renderTelopUi);
+telopFillInput.addEventListener("input", renderTelopUi);
+telopStrokeInput.addEventListener("input", renderTelopUi);
+telopXInput.addEventListener("input", renderTelopUi);
+telopYInput.addEventListener("input", renderTelopUi);
+telopUseCurrentButton.addEventListener("click", setTelopDraftStartToCurrentTime);
+telopInsertButton.addEventListener("click", insertTelopFromDraft);
+telopUpdateButton.addEventListener("click", updateSelectedTelopFromDraft);
+telopRemoveButton.addEventListener("click", removeSelectedTelop);
+telopList.addEventListener("click", handleTelopListClick);
+
+for (const button of telopPositionButtons) {
+  button.addEventListener("click", () => {
+    const mode = button.dataset.telopPosition as TelopPositionMode | undefined;
+    if (mode) {
+      setTelopPositionMode(mode);
+    }
+  });
+}
 
 cropBox.addEventListener("pointerdown", startCropDrag);
 cropBox.addEventListener("keydown", handleCropKeyboard);
@@ -1370,7 +1565,7 @@ exportAudioSelect.addEventListener("change", () => {
 for (const button of exportTabButtons) {
   button.addEventListener("click", () => {
     const tab = button.dataset.exportTab;
-    if (tab === "settings" || tab === "log") {
+    if (tab === "settings" || tab === "telop" || tab === "log") {
       setActiveExportTab(tab);
     }
   });
@@ -2197,6 +2392,11 @@ function beginSourceLoad(
   state.fpsMode = "original";
   state.fpsValue = FPS_DEFAULT;
   state.audioMode = "keep";
+  state.telops = [];
+  state.selectedTelopId = null;
+  state.telopDraftStartTime = 0;
+  telopNextOrder = 0;
+  resetTelopForm();
   state.compatibilityFallbackAllowed =
     state.sourceKind === "video" && options.skipCompatibilityFallback !== true;
   state.thumbnailGenerationId += 1;
@@ -2224,6 +2424,7 @@ function beginSourceLoad(
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
+  renderTelopUi();
   renderExportUi();
 
   if (isGif) {
@@ -3416,7 +3617,8 @@ function captureEditSettings(): EditSettingsSnapshot {
     resizeAspectLocked: state.resizeAspectLocked,
     fpsMode: state.fpsMode,
     fpsValue: state.fpsValue,
-    audioMode: state.audioMode
+    audioMode: state.audioMode,
+    telops: cloneTelops(state.telops)
   };
 }
 
@@ -3474,6 +3676,10 @@ function restoreEditSettings(settings: EditSettingsSnapshot): void {
   state.fpsMode = isFpsEditable() ? settings.fpsMode : "original";
   state.fpsValue = clampFpsValue(settings.fpsValue);
   state.audioMode = state.sourceKind === "video" ? settings.audioMode : "keep";
+  state.telops = cloneTelops(settings.telops).map(normalizeTelop);
+  state.selectedTelopId = null;
+  state.telopDraftStartTime = getDefaultTelopStartTime();
+  telopNextOrder = getNextTelopOrder(state.telops);
 }
 
 function handlePreviewLoadFailure(): void {
@@ -3495,6 +3701,7 @@ function handlePreviewLoadFailure(): void {
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
+  renderTelopUi();
   renderExportUi();
   updatePlaybackUi();
 }
@@ -3677,6 +3884,7 @@ function updatePreviewFit(): void {
   videoStage.classList.toggle("fit-width", fitWidth);
   videoStage.classList.toggle("fit-height", !fitWidth);
   renderCropUi();
+  renderTelopOverlay();
 }
 
 function handleTimeUpdate(): void {
@@ -3710,6 +3918,8 @@ function updatePlaybackUi(): void {
   seekInput.style.setProperty("--seek-progress", `${seekProgress}%`);
   seekInput.value =
     duration > 0 ? String(Math.round((currentTime / duration) * Number(seekInput.max))) : "0";
+  renderTelopOverlay();
+  renderTelopTimingUi();
 }
 
 function setPlayerIconButton(
@@ -3740,9 +3950,14 @@ function isSingleFrameSource(): boolean {
   return state.sourceKind === "image";
 }
 
+function isSingleFrameTelopSource(): boolean {
+  return isSingleFrameSource() || (state.sourceKind === "gif" && state.gifFrames.length === 1);
+}
+
 function renderSourceModeUi(): void {
   controlGrid.classList.toggle("is-hidden", state.sourceKind === "empty");
   renderFpsUi();
+  renderTelopUi();
 }
 
 function isFpsEditable(): boolean {
@@ -3801,6 +4016,495 @@ function renderFpsUi(): void {
     button.setAttribute("aria-pressed", String(isSelected));
     button.disabled = !editable;
   }
+}
+
+function isTelopEditable(): boolean {
+  return state.canPreviewDirectly && state.sourceKind !== "empty";
+}
+
+function cloneTelops(telops: TelopItem[]): TelopItem[] {
+  return telops.map((telop) => ({ ...telop }));
+}
+
+function normalizeTelop(telop: TelopItem): TelopItem {
+  return {
+    ...telop,
+    text: telop.text,
+    startTime: isSingleFrameTelopSource() ? 0 : roundTime(clamp(telop.startTime, 0, state.duration)),
+    duration: clampTelopDuration(telop.duration),
+    fillColor: normalizeHexColor(telop.fillColor, TELOP_DEFAULT_FILL_COLOR),
+    strokeColor: normalizeHexColor(telop.strokeColor, TELOP_DEFAULT_STROKE_COLOR),
+    fontSizePercent: clampTelopFontSize(telop.fontSizePercent),
+    positionMode: telop.positionMode === "custom" ? "custom" : "default",
+    xPercent: clampPercent(telop.xPercent),
+    yPercent: clampPercent(telop.yPercent),
+    createdOrder: Number.isFinite(telop.createdOrder) ? telop.createdOrder : 0
+  };
+}
+
+function getNextTelopOrder(telops: TelopItem[]): number {
+  return telops.reduce((nextOrder, telop) => Math.max(nextOrder, telop.createdOrder + 1), 0);
+}
+
+function getSelectedTelop(): TelopItem | null {
+  return state.telops.find((telop) => telop.id === state.selectedTelopId) ?? null;
+}
+
+function getDefaultTelopStartTime(): number {
+  return isSingleFrameTelopSource() ? 0 : roundTime(clamp(getCurrentPreviewTime(), 0, state.duration));
+}
+
+function getTelopDraftStartTime(): number {
+  return state.selectedTelopId ? state.telopDraftStartTime : getDefaultTelopStartTime();
+}
+
+function getTelopFormPositionMode(): TelopPositionMode {
+  return telopCustomFields.dataset.telopPosition === "custom" ? "custom" : "default";
+}
+
+function setTelopPositionMode(mode: TelopPositionMode): void {
+  telopCustomFields.dataset.telopPosition = mode;
+  renderTelopUi();
+}
+
+function setTelopDraftStartToCurrentTime(): void {
+  if (!getSelectedTelop() || isSingleFrameTelopSource()) {
+    renderTelopUi();
+    return;
+  }
+
+  state.telopDraftStartTime = getDefaultTelopStartTime();
+  renderTelopUi();
+}
+
+function resetTelopForm(): void {
+  state.selectedTelopId = null;
+  state.telopDraftStartTime = getDefaultTelopStartTime();
+  telopTextInput.value = "";
+  telopDurationInput.value = formatSecondsInput(TELOP_DEFAULT_DURATION);
+  telopFontSizeInput.value = formatTelopNumber(TELOP_DEFAULT_FONT_SIZE_PERCENT);
+  telopOutlineInput.checked = true;
+  telopFillInput.value = TELOP_DEFAULT_FILL_COLOR;
+  telopStrokeInput.value = TELOP_DEFAULT_STROKE_COLOR;
+  telopXInput.value = String(TELOP_DEFAULT_X_PERCENT);
+  telopYInput.value = String(TELOP_DEFAULT_Y_PERCENT);
+  telopCustomFields.dataset.telopPosition = "default";
+}
+
+function loadTelopIntoForm(telop: TelopItem): void {
+  state.selectedTelopId = telop.id;
+  state.telopDraftStartTime = telop.startTime;
+  telopTextInput.value = telop.text;
+  telopDurationInput.value = formatSecondsInput(telop.duration);
+  telopFontSizeInput.value = formatTelopNumber(telop.fontSizePercent);
+  telopOutlineInput.checked = telop.outlineEnabled;
+  telopFillInput.value = normalizeHexColor(telop.fillColor, TELOP_DEFAULT_FILL_COLOR);
+  telopStrokeInput.value = normalizeHexColor(telop.strokeColor, TELOP_DEFAULT_STROKE_COLOR);
+  telopXInput.value = formatTelopNumber(telop.xPercent);
+  telopYInput.value = formatTelopNumber(telop.yPercent);
+  telopCustomFields.dataset.telopPosition = telop.positionMode;
+}
+
+function readTelopDraftFromForm(id = "draft", createdOrder = -1): TelopItem | null {
+  if (!isTelopEditable()) {
+    return null;
+  }
+
+  const text = telopTextInput.value.trim();
+
+  if (!text) {
+    return null;
+  }
+
+  return normalizeTelop({
+    id,
+    text,
+    startTime: getTelopDraftStartTime(),
+    duration: isSingleFrameTelopSource()
+      ? TELOP_DEFAULT_DURATION
+      : clampTelopDuration(Number(telopDurationInput.value)),
+    outlineEnabled: telopOutlineInput.checked,
+    fillColor: normalizeHexColor(telopFillInput.value, TELOP_DEFAULT_FILL_COLOR),
+    strokeColor: normalizeHexColor(telopStrokeInput.value, TELOP_DEFAULT_STROKE_COLOR),
+    fontSizePercent: clampTelopFontSize(Number(telopFontSizeInput.value)),
+    positionMode: getTelopFormPositionMode(),
+    xPercent: clampPercent(Number(telopXInput.value)),
+    yPercent: clampPercent(Number(telopYInput.value)),
+    createdOrder
+  });
+}
+
+function insertTelopFromDraft(): void {
+  const telop = readTelopDraftFromForm(`telop-${Date.now()}-${telopNextOrder}`, telopNextOrder);
+
+  if (!telop || state.selectedTelopId) {
+    renderTelopUi();
+    return;
+  }
+
+  telopNextOrder += 1;
+  state.telops = sortTelops([...state.telops, telop]);
+  resetTelopForm();
+  handleTelopSettingsChanged();
+}
+
+function updateSelectedTelopFromDraft(): void {
+  const selectedTelop = getSelectedTelop();
+
+  if (!selectedTelop) {
+    renderTelopUi();
+    return;
+  }
+
+  const nextTelop = readTelopDraftFromForm(selectedTelop.id, selectedTelop.createdOrder);
+
+  if (!nextTelop) {
+    renderTelopUi();
+    return;
+  }
+
+  state.telops = sortTelops(
+    state.telops.map((telop) => telop.id === selectedTelop.id ? nextTelop : telop)
+  );
+  loadTelopIntoForm(nextTelop);
+  handleTelopSettingsChanged();
+}
+
+function removeSelectedTelop(): void {
+  const selectedTelop = getSelectedTelop();
+
+  if (!selectedTelop) {
+    renderTelopUi();
+    return;
+  }
+
+  state.telops = state.telops.filter((telop) => telop.id !== selectedTelop.id);
+  resetTelopForm();
+  handleTelopSettingsChanged();
+}
+
+function handleTelopSettingsChanged(): void {
+  invalidateExportOutput();
+
+  renderTelopUi();
+  renderExportUi();
+}
+
+function handleTelopListClick(event: MouseEvent): void {
+  const item = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-telop-id]");
+  const telopId = item?.dataset.telopId;
+
+  if (!telopId) {
+    return;
+  }
+
+  const telop = state.telops.find((entry) => entry.id === telopId);
+
+  if (!telop) {
+    return;
+  }
+
+  if (state.selectedTelopId === telop.id) {
+    resetTelopForm();
+  } else {
+    loadTelopIntoForm(telop);
+  }
+
+  renderTelopUi();
+}
+
+function sortTelops(telops: TelopItem[]): TelopItem[] {
+  return [...telops].sort((left, right) => {
+    const timeDelta = left.startTime - right.startTime;
+    return Math.abs(timeDelta) > 0.0001 ? timeDelta : left.createdOrder - right.createdOrder;
+  });
+}
+
+function renderTelopUi(): void {
+  const editable = isTelopEditable();
+  const selected = getSelectedTelop();
+  const selectedMode = getTelopFormPositionMode();
+  const customPosition = selectedMode === "custom";
+
+  telopTextInput.disabled = !editable;
+  telopDurationInput.disabled = !editable || isSingleFrameTelopSource();
+  telopFontSizeInput.disabled = !editable;
+  telopOutlineInput.disabled = !editable;
+  telopFillInput.disabled = !editable;
+  telopStrokeInput.disabled = !editable;
+  telopXInput.disabled = !editable || !customPosition;
+  telopYInput.disabled = !editable || !customPosition;
+  telopUseCurrentButton.disabled = !editable || selected === null || isSingleFrameTelopSource();
+  telopInsertButton.disabled = !editable || selected !== null || readTelopDraftFromForm() === null;
+  telopUpdateButton.disabled = !editable || selected === null || readTelopDraftFromForm() === null;
+  telopRemoveButton.disabled = !editable || selected === null;
+
+  for (const button of telopPositionButtons) {
+    const mode = button.dataset.telopPosition as TelopPositionMode | undefined;
+    const isSelected = mode === selectedMode;
+    button.classList.toggle("is-selected", isSelected);
+    button.setAttribute("aria-pressed", String(isSelected));
+    button.disabled = !editable;
+  }
+
+  telopCustomFields.classList.toggle("is-disabled", !customPosition);
+  telopCount.textContent = `${state.telops.length} ${state.telops.length === 1 ? "item" : "items"}`;
+  renderTelopTimingUi();
+  renderTelopList();
+  renderTelopOverlay();
+}
+
+function renderTelopTimingUi(): void {
+  const selected = getSelectedTelop();
+  const startTime = selected ? state.telopDraftStartTime : getDefaultTelopStartTime();
+  telopStartSummary.textContent = isSingleFrameTelopSource()
+    ? "Single frame"
+    : `Start ${formatSecondsInput(startTime)}s`;
+}
+
+function renderTelopList(): void {
+  if (state.telops.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "telop-empty";
+    empty.textContent = "No telops yet.";
+    telopList.replaceChildren(empty);
+    return;
+  }
+
+  telopList.replaceChildren(
+    ...sortTelops(state.telops).map((telop) => {
+      const item = document.createElement("button");
+      item.className = "telop-list-item";
+      item.type = "button";
+      item.dataset.telopId = telop.id;
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", String(telop.id === state.selectedTelopId));
+      item.classList.toggle("is-selected", telop.id === state.selectedTelopId);
+
+      const time = document.createElement("span");
+      time.className = "telop-list-time";
+      time.textContent = isSingleFrameTelopSource()
+        ? "Single"
+        : `${formatSecondsInput(telop.startTime)}s / ${formatSecondsInput(telop.duration)}s`;
+
+      const text = document.createElement("strong");
+      text.textContent = telop.text;
+
+      item.append(time, text);
+      return item;
+    })
+  );
+}
+
+function renderTelopOverlay(): void {
+  const telops = getPreviewTelops();
+
+  telopOverlay.replaceChildren(...telops.map(createTelopOverlayElement));
+}
+
+function getPreviewTelops(): TelopItem[] {
+  if (!isTelopEditable()) {
+    return [];
+  }
+
+  const currentTime = getCurrentPreviewTime();
+  const draftTelop = activeExportTab === "telop" ? readTelopDraftFromForm("draft", Number.MAX_SAFE_INTEGER) : null;
+  const selectedId = draftTelop ? state.selectedTelopId : null;
+  const savedTelops = getActiveTelopsAtTime(currentTime).filter((telop) => telop.id !== selectedId);
+
+  if (!draftTelop) {
+    return savedTelops;
+  }
+
+  if (state.selectedTelopId && !isTelopActiveAtTime(draftTelop, currentTime)) {
+    return savedTelops;
+  }
+
+  return [...savedTelops, draftTelop];
+}
+
+function getActiveTelopsAtTime(time: number): TelopItem[] {
+  if (isSingleFrameTelopSource()) {
+    return sortTelops(state.telops);
+  }
+
+  return sortTelops(state.telops.filter((telop) => isTelopActiveAtTime(telop, time)));
+}
+
+function isTelopActiveAtTime(telop: TelopItem, time: number): boolean {
+  return isSingleFrameTelopSource() || (time >= telop.startTime && time < telop.startTime + telop.duration);
+}
+
+function createTelopOverlayElement(telop: TelopItem): HTMLElement {
+  const element = document.createElement("div");
+  element.className = "telop-text";
+  element.classList.toggle("has-outline", telop.outlineEnabled);
+  element.classList.toggle("is-default-position", telop.positionMode === "default");
+  element.textContent = telop.text;
+  element.style.setProperty("--telop-fill", telop.fillColor);
+  element.style.setProperty("--telop-stroke", telop.strokeColor);
+  element.style.setProperty("--telop-size", `${getPreviewTelopFontSize(telop)}px`);
+  element.style.setProperty("--telop-x", `${telop.xPercent}%`);
+  element.style.setProperty("--telop-y", `${telop.yPercent}%`);
+  element.style.setProperty("--telop-width", `${getTelopMaxWidthPercent(telop)}%`);
+  return element;
+}
+
+function getPreviewTelopFontSize(telop: TelopItem): number {
+  const stageHeight = videoStage.getBoundingClientRect().height || state.height || 0;
+  return Math.max(8, stageHeight * (telop.fontSizePercent / 100));
+}
+
+function drawTelopsToCanvas(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  time: number
+): void {
+  const telops = getActiveTelopsAtTime(time);
+
+  if (telops.length === 0) {
+    return;
+  }
+
+  context.save();
+  context.textAlign = "left";
+  context.lineJoin = "round";
+  context.lineCap = "round";
+
+  for (const telop of telops) {
+    drawSingleTelopToCanvas(context, canvas, telop);
+  }
+
+  context.restore();
+}
+
+function drawSingleTelopToCanvas(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  telop: TelopItem
+): void {
+  const fontSize = Math.max(8, canvas.height * (telop.fontSizePercent / 100));
+  const lineHeight = fontSize * 1.22;
+  const x = canvas.width * (telop.xPercent / 100);
+  const y = canvas.height * (telop.yPercent / 100);
+  const maxWidth = canvas.width * (getTelopMaxWidthPercent(telop) / 100);
+  const lines = wrapTelopText(context, telop.text, maxWidth, fontSize);
+  const startY = telop.positionMode === "default" ? y - lineHeight * (lines.length - 1) : y;
+
+  context.font = `800 ${fontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  context.fillStyle = telop.fillColor;
+  context.strokeStyle = telop.strokeColor;
+  context.lineWidth = Math.max(2, fontSize * 0.14);
+  context.textBaseline = telop.positionMode === "default" ? "alphabetic" : "top";
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineY = startY + lineHeight * index;
+
+    if (telop.outlineEnabled) {
+      context.strokeText(lines[index], x, lineY);
+    }
+
+    context.fillText(lines[index], x, lineY);
+  }
+}
+
+function wrapTelopText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  fontSize: number
+): string[] {
+  context.font = `800 ${fontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const lines: string[] = [];
+
+  for (const sourceLine of text.split(/\r?\n/)) {
+    const words = sourceLine.split(/(\s+)/).filter((part) => part.length > 0);
+    let currentLine = "";
+
+    for (const word of words) {
+      if (context.measureText(word).width > maxWidth) {
+        if (currentLine.trimEnd()) {
+          lines.push(currentLine.trimEnd());
+          currentLine = "";
+        }
+
+        lines.push(...breakLongTelopToken(context, word.trim(), maxWidth));
+        continue;
+      }
+
+      const nextLine = `${currentLine}${word}`;
+
+      if (currentLine && context.measureText(nextLine).width > maxWidth) {
+        lines.push(currentLine.trimEnd());
+        currentLine = word.trimStart();
+      } else {
+        currentLine = nextLine;
+      }
+    }
+
+    if (currentLine) {
+      lines.push(currentLine.trimEnd());
+    } else {
+      lines.push("");
+    }
+  }
+
+  return lines.length > 0 ? lines : [""];
+}
+
+function breakLongTelopToken(
+  context: CanvasRenderingContext2D,
+  token: string,
+  maxWidth: number
+): string[] {
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (const char of token) {
+    const nextLine = `${currentLine}${char}`;
+
+    if (currentLine && context.measureText(nextLine).width > maxWidth) {
+      lines.push(currentLine);
+      currentLine = char;
+    } else {
+      currentLine = nextLine;
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines;
+}
+
+function getTelopMaxWidthPercent(telop: TelopItem): number {
+  return telop.positionMode === "default"
+    ? 90
+    : clamp(100 - telop.xPercent, 8, 100);
+}
+
+function clampTelopDuration(value: number): number {
+  const safeValue = Number.isFinite(value) ? value : TELOP_DEFAULT_DURATION;
+  return Math.round(clamp(safeValue, TELOP_MIN_DURATION, TELOP_MAX_DURATION) * 10) / 10;
+}
+
+function clampTelopFontSize(value: number): number {
+  const safeValue = Number.isFinite(value) ? value : TELOP_DEFAULT_FONT_SIZE_PERCENT;
+  return Math.round(clamp(safeValue, TELOP_MIN_FONT_SIZE_PERCENT, TELOP_MAX_FONT_SIZE_PERCENT) * 10) / 10;
+}
+
+function clampPercent(value: number): number {
+  const safeValue = Number.isFinite(value) ? value : 0;
+  return Math.round(clamp(safeValue, 0, 100) * 10) / 10;
+}
+
+function normalizeHexColor(value: string, fallback: string): string {
+  return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
+
+function formatTelopNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
 function seekPreviewToTime(time: number): void {
@@ -4960,17 +5664,28 @@ async function runFfmpegTransform(
       commandPlan.args = commandPlan.buildArgsWithVideoProbe(probe);
     }
 
+    await prepareVideoTelopOverlayInputs(ffmpeg, commandPlan, workFiles);
+
     exportState.progress = Math.max(exportState.progress, 0.16);
     exportState.message = `${runningMessage} ${formatExportLabel(commandPlan.format)}...`;
     appendExportLog(exportState.message);
     renderExportUi();
 
     latestFfmpegLog = "";
-    const exitCode = await ffmpeg.exec(commandPlan.args);
+    const exitCode = await runTrackedFfmpegExec(
+      ffmpeg,
+      commandPlan.args,
+      getCommandPlanProgressDuration(commandPlan),
+      0.16,
+      0.9
+    );
 
     if (exitCode !== 0) {
       throw new Error(latestFfmpegLog || `FFmpeg exited with code ${exitCode}.`);
     }
+
+    exportState.progress = Math.max(exportState.progress, 0.9);
+    renderExportUi();
 
     const exportedFile = await ffmpeg.readFile(commandPlan.outputName);
     const exportedBytes = typeof exportedFile === "string"
@@ -5003,6 +5718,7 @@ async function runVideoImageSequenceExport(
 
   let ffmpeg: FFmpeg | null = null;
   const outputDirectory = commandPlan.sequenceOutputDirectory;
+  const workFiles = new Set<string>();
 
   if (!outputDirectory) {
     throw new Error("Image sequence output directory is missing.");
@@ -5018,18 +5734,29 @@ async function runVideoImageSequenceExport(
     renderExportUi();
 
     await ffmpeg.createDir(outputDirectory);
-    await prepareVideoExportInput(ffmpeg, commandPlan, sourceFile, new Set<string>());
+    await prepareVideoExportInput(ffmpeg, commandPlan, sourceFile, workFiles);
+    await prepareVideoTelopOverlayInputs(ffmpeg, commandPlan, workFiles);
 
     exportState.progress = 0.12;
     exportState.message = `Exporting ${formatExportLabel(commandPlan.format)} frames...`;
     appendExportLog(exportState.message);
     renderExportUi();
 
-    const exitCode = await ffmpeg.exec(commandPlan.args);
+    latestFfmpegLog = "";
+    const exitCode = await runTrackedFfmpegExec(
+      ffmpeg,
+      commandPlan.args,
+      getCommandPlanProgressDuration(commandPlan),
+      0.12,
+      0.56
+    );
 
     if (exitCode !== 0) {
       throw new Error(latestFfmpegLog || `FFmpeg exited with code ${exitCode}.`);
     }
+
+    exportState.progress = Math.max(exportState.progress, 0.56);
+    renderExportUi();
 
     const entries = await ffmpeg.listDir(outputDirectory);
     const frameNames = entries
@@ -5053,7 +5780,7 @@ async function runVideoImageSequenceExport(
       const outputFileName = getImageSequenceFileName(saveTarget.baseName, index, frameNames.length, commandPlan.format);
 
       await writeBlobToDirectory(saveTarget.handle, outputFileName, blob);
-      exportState.progress = 0.18 + ((index + 1) / frameNames.length) * 0.78;
+      exportState.progress = 0.58 + ((index + 1) / frameNames.length) * 0.38;
       exportState.message = `Saving frame ${index + 1} / ${frameNames.length}...`;
       appendExportLog(`Saved ${outputFileName}`);
       renderExportUi();
@@ -5064,10 +5791,7 @@ async function runVideoImageSequenceExport(
     return frameNames.length;
   } finally {
     if (ffmpeg) {
-      if (commandPlan.inputName) {
-        await safeDeleteFfmpegFile(ffmpeg, commandPlan.inputName);
-      }
-
+      await safeDeleteFfmpegFiles(ffmpeg, Array.from(workFiles));
       await safeDeleteFfmpegDirectory(ffmpeg, outputDirectory);
     }
   }
@@ -5106,7 +5830,7 @@ async function runCanvasImageSequenceExport(
 
   for (let index = 0; index < exportFrames.length; index += 1) {
     const exportFrame = exportFrames[index];
-    drawExportFrameToCanvas(context, canvas, exportFrame.canvas, geometry);
+    drawExportFrameToCanvas(context, canvas, exportFrame.canvas, geometry, exportFrame.time);
     const blob = await encodeStaticCanvas(canvas, commandPlan.format);
     const outputFileName = getImageSequenceFileName(saveTarget.baseName, index, exportFrames.length, commandPlan.format);
 
@@ -5149,6 +5873,23 @@ async function prepareVideoExportInput(
   await ffmpeg.writeFile(commandPlan.inputName, await fetchFile(sourceFile));
 }
 
+async function prepareVideoTelopOverlayInputs(
+  ffmpeg: FFmpeg,
+  commandPlan: ExportCommandPlan,
+  workFiles: Set<string>
+): Promise<void> {
+  const overlays = commandPlan.videoTelopOverlays ?? [];
+
+  for (let index = 0; index < overlays.length; index += 1) {
+    const overlay = overlays[index];
+    workFiles.add(overlay.inputName);
+    await ffmpeg.writeFile(overlay.inputName, await canvasToPngBytes(overlay.canvas));
+    exportState.progress = Math.max(exportState.progress, 0.12);
+    exportState.message = `Preparing telop overlay ${index + 1} / ${overlays.length}...`;
+    renderExportUi();
+  }
+}
+
 async function probeVideoSource(ffmpeg: FFmpeg, inputName: string): Promise<VideoSourceProbe> {
   exportState.progress = Math.max(exportState.progress, 0.1);
   exportState.message = "Reading source streams...";
@@ -5181,6 +5922,78 @@ async function probeVideoSource(ffmpeg: FFmpeg, inputName: string): Promise<Vide
     hasAudio,
     usedFallbackFps: !parsedFps
   };
+}
+
+async function runTrackedFfmpegExec(
+  ffmpeg: FFmpeg,
+  args: string[],
+  targetDurationSeconds: number | null,
+  startProgress: number,
+  endProgress: number
+): Promise<number> {
+  beginFfmpegProgressTracking(targetDurationSeconds, startProgress, endProgress);
+
+  try {
+    return await ffmpeg.exec(args);
+  } finally {
+    endFfmpegProgressTracking();
+  }
+}
+
+function beginFfmpegProgressTracking(
+  targetDurationSeconds: number | null,
+  startProgress: number,
+  endProgress: number
+): void {
+  ffmpegProgressContext = {
+    targetDurationSeconds:
+      targetDurationSeconds !== null && Number.isFinite(targetDurationSeconds) && targetDurationSeconds > 0
+        ? targetDurationSeconds
+        : null,
+    startProgress: clamp(startProgress, 0, 1),
+    endProgress: clamp(endProgress, 0, 1)
+  };
+}
+
+function endFfmpegProgressTracking(): void {
+  ffmpegProgressContext = null;
+}
+
+function updateFfmpegProgressFromLog(message: string): boolean {
+  if (!ffmpegProgressContext || exportState.status !== "running") {
+    return false;
+  }
+
+  const timeSeconds = parseFfmpegProgressTime(message);
+
+  if (timeSeconds === null || ffmpegProgressContext.targetDurationSeconds === null) {
+    return false;
+  }
+
+  const ratio = clamp(timeSeconds / ffmpegProgressContext.targetDurationSeconds, 0, 1);
+  const progress =
+    ffmpegProgressContext.startProgress +
+    (ffmpegProgressContext.endProgress - ffmpegProgressContext.startProgress) * ratio;
+  exportState.progress = Math.max(exportState.progress, Math.min(ffmpegProgressContext.endProgress, progress));
+  return true;
+}
+
+function parseFfmpegProgressTime(message: string): number | null {
+  const match = message.match(/\btime=(\d+):(\d+):(\d+(?:\.\d+)?)/);
+
+  if (!match) {
+    return null;
+  }
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) {
+    return null;
+  }
+
+  return hours * 3600 + minutes * 60 + seconds;
 }
 
 function parseVideoFpsFromLogs(logs: string[]): number | null {
@@ -5291,7 +6104,7 @@ async function prepareFrameSequenceExportInput(ffmpeg: FFmpeg, workFiles: Set<st
     const frameName = `${GIF_FRAME_FILE_PREFIX}-${String(index).padStart(5, "0")}.png`;
 
     workFiles.add(frameName);
-    drawExportFrameToCanvas(context, canvas, exportFrame.canvas, geometry);
+    drawExportFrameToCanvas(context, canvas, exportFrame.canvas, geometry, exportFrame.time);
     await ffmpeg.writeFile(frameName, await canvasToPngBytes(canvas));
     frameNames.push(frameName);
 
@@ -5312,7 +6125,8 @@ function getFrameSequenceExportFrames(applyFpsSpeed = true): CanvasExportFrame[]
     return [
       {
         canvas: getStaticSourceCanvas(),
-        duration: 1
+        duration: 1,
+        time: 0
       }
     ];
   }
@@ -5338,7 +6152,8 @@ function getTrimmedGifExportFrames(applyFpsSpeed = true): CanvasExportFrame[] {
     if (duration > 0.001) {
       exportFrames.push({
         canvas: frame.canvas,
-        duration: customFrameDuration ?? Math.max(MIN_FRAME_DURATION_SECONDS, duration)
+        duration: customFrameDuration ?? Math.max(MIN_FRAME_DURATION_SECONDS, duration),
+        time: frameStart
       });
     }
   }
@@ -5402,7 +6217,8 @@ function drawExportFrameToCanvas(
   context: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
   sourceCanvas: HTMLCanvasElement,
-  geometry: GifExportGeometry
+  geometry: GifExportGeometry,
+  time: number
 ): void {
   context.clearRect(0, 0, canvas.width, canvas.height);
   context.drawImage(
@@ -5416,6 +6232,7 @@ function drawExportFrameToCanvas(
     geometry.outputWidth,
     geometry.outputHeight
   );
+  drawTelopsToCanvas(context, canvas, time);
 }
 
 function createEditedStaticFrameCanvas(): HTMLCanvasElement {
@@ -5432,7 +6249,7 @@ function createEditedStaticFrameCanvas(): HTMLCanvasElement {
   canvas.height = geometry.outputHeight;
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
-  drawExportFrameToCanvas(context, canvas, sourceCanvas, geometry);
+  drawExportFrameToCanvas(context, canvas, sourceCanvas, geometry, 0);
 
   return canvas;
 }
@@ -5683,6 +6500,7 @@ function canAssignSource(): boolean {
     state.sourceFile !== null &&
     state.canPreviewDirectly &&
     !isExportBusy() &&
+    getExportUnavailableReason() === null &&
     hasPendingEditSettings()
   );
 }
@@ -5697,7 +6515,7 @@ function hasPendingEditSettings(): boolean {
   }
 
   if (isSingleFrameSource()) {
-    return state.cropMode !== "full" || state.resizeMode !== "original";
+    return state.cropMode !== "full" || state.resizeMode !== "original" || state.telops.length > 0;
   }
 
   return (
@@ -5707,7 +6525,8 @@ function hasPendingEditSettings(): boolean {
       state.cropMode !== "full" ||
       state.resizeMode !== "original" ||
       isFpsSpeedChangeActive() ||
-      isAudioRemoveActive()
+      isAudioRemoveActive() ||
+      state.telops.length > 0
     )
   );
 }
@@ -5917,6 +6736,46 @@ function getEstimatedGifFrameCount(): number {
   return 0;
 }
 
+function getCommandPlanProgressDuration(commandPlan: ExportCommandPlan): number | null {
+  if (
+    commandPlan.progressDurationSeconds !== undefined &&
+    Number.isFinite(commandPlan.progressDurationSeconds) &&
+    commandPlan.progressDurationSeconds > 0
+  ) {
+    return commandPlan.progressDurationSeconds;
+  }
+
+  if (commandPlan.sourceKind === "video") {
+    return getCurrentTrimDuration();
+  }
+
+  if (commandPlan.sourceKind === "gif" || commandPlan.sourceKind === "image") {
+    return getFrameSequenceProgressDuration();
+  }
+
+  return null;
+}
+
+function getCurrentTrimDuration(): number {
+  return Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+}
+
+function getFrameSequenceProgressDuration(): number | null {
+  try {
+    const exportFrames = getFrameSequenceExportFrames();
+    const duration = exportFrames.reduce((total, frame) => total + frame.duration, 0);
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
+  } catch {
+    return null;
+  }
+}
+
+function getVideoSpeedChangedDuration(sourceFps: number, targetFps: number): number {
+  const safeSourceFps = Number.isFinite(sourceFps) && sourceFps > 0 ? sourceFps : VIDEO_SOURCE_FPS_FALLBACK;
+  const safeTargetFps = clampFpsValue(targetFps);
+  return getCurrentTrimDuration() / (safeTargetFps / safeSourceFps);
+}
+
 function formatEstimatedFileSize(bytes: number): string {
   if (bytes >= 1024 * 1024) {
     return `${(bytes / (1024 * 1024)).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
@@ -6062,8 +6921,13 @@ function handleFfmpegLog(event: LogEvent): void {
 
   latestFfmpegLog = message;
   appendExportLog(message);
+  const progressUpdatedFromLog = updateFfmpegProgressFromLog(message);
 
   if (isExportBusy()) {
+    if (!progressUpdatedFromLog && exportState.status === "running") {
+      exportState.progress = Math.max(exportState.progress, ffmpegProgressContext?.startProgress ?? exportState.progress);
+    }
+
     renderExportUi();
   }
 }
@@ -6079,6 +6943,10 @@ function handleFfmpegProgress(event: ProgressEvent): void {
   }
 
   if (exportState.status !== "running") {
+    return;
+  }
+
+  if (ffmpegProgressContext && ffmpegProgressContext.targetDurationSeconds !== null) {
     return;
   }
 
@@ -6129,6 +6997,10 @@ function buildVideoExportCommand(sourceFile: File, format: ExportFormat): Export
 function buildVideoMp4ExportCommand(sourceFile: File): ExportCommandPlan {
   if (isFpsSpeedChangeActive()) {
     return buildVideoMp4SpeedChangeExportCommand(sourceFile);
+  }
+
+  if (state.telops.length > 0) {
+    return buildVideoMp4TelopExportCommand(sourceFile);
   }
 
   const inputName = `input.${getFileExtension(sourceFile.name)}`;
@@ -6182,10 +7054,10 @@ function buildVideoMp4ExportCommand(sourceFile: File): ExportCommandPlan {
   };
 }
 
-function buildVideoMp4SpeedChangeExportCommand(sourceFile: File): ExportCommandPlan {
+function buildVideoMp4TelopExportCommand(sourceFile: File): ExportCommandPlan {
   const inputName = `input.${getFileExtension(sourceFile.name)}`;
   const outputName = EXPORT_MP4_OUTPUT_NAME;
-  const targetFps = clampFpsValue(state.fpsValue);
+  const overlays = buildVideoTelopOverlayInputs(1);
 
   return {
     sourceKind: "video",
@@ -6198,35 +7070,112 @@ function buildVideoMp4SpeedChangeExportCommand(sourceFile: File): ExportCommandP
     saveDescription: getExportSaveDescription("mp4"),
     saveAccept: getExportSaveAccept("mp4"),
     args: [],
-    buildArgsWithVideoProbe: (probe) => buildVideoMp4SpeedChangeArgs(inputName, outputName, targetFps, probe)
+    videoTelopOverlays: overlays,
+    buildArgsWithVideoProbe: (probe) => buildVideoMp4TelopExportArgs(inputName, outputName, probe, overlays)
   };
+}
+
+function buildVideoMp4TelopExportArgs(
+  inputName: string,
+  outputName: string,
+  probe: VideoSourceProbe,
+  overlays: VideoTelopOverlayInput[]
+): string[] {
+  const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+  const frameFilters = buildVideoTrimmedFrameFilters(trimDuration);
+  const args = [
+    "-y",
+    "-i", inputName
+  ];
+  appendVideoTelopOverlayInputArgs(args, overlays);
+  args.push("-filter_complex");
+  const videoFilterGraph = buildVideoOverlayFilterGraph("[0:v:0]", frameFilters, overlays, "v");
+
+  if (probe.hasAudio && state.audioMode === "keep") {
+    const audioFilters = [
+      `atrim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
+      "asetpts=PTS-STARTPTS"
+    ];
+    args.push(`${videoFilterGraph};[0:a:0]${audioFilters.join(",")}[a]`);
+    args.push("-map", "[v]", "-map", "[a]");
+  } else {
+    args.push(videoFilterGraph);
+    args.push("-map", "[v]", "-an");
+  }
+
+  args.push(
+    "-dn",
+    "-sn",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "23",
+    "-pix_fmt", "yuv420p"
+  );
+
+  if (probe.hasAudio && state.audioMode === "keep") {
+    args.push("-c:a", "aac", "-b:a", "128k");
+  }
+
+  args.push("-movflags", "+faststart", outputName);
+
+  return args;
+}
+
+function buildVideoMp4SpeedChangeExportCommand(sourceFile: File): ExportCommandPlan {
+  const inputName = `input.${getFileExtension(sourceFile.name)}`;
+  const outputName = EXPORT_MP4_OUTPUT_NAME;
+  const targetFps = clampFpsValue(state.fpsValue);
+
+  const commandPlan: ExportCommandPlan = {
+    sourceKind: "video",
+    format: "mp4",
+    execution: "ffmpeg",
+    inputName,
+    outputName,
+    outputFileName: getExportFileName(sourceFile.name, "mp4"),
+    outputMimeType: getExportMimeType("mp4"),
+    saveDescription: getExportSaveDescription("mp4"),
+    saveAccept: getExportSaveAccept("mp4"),
+    args: [],
+    buildArgsWithVideoProbe: (probe) => {
+      const overlays = buildVideoTelopOverlayInputs(targetFps / probe.fps);
+      commandPlan.videoTelopOverlays = overlays;
+      commandPlan.progressDurationSeconds = getVideoSpeedChangedDuration(probe.fps, targetFps);
+      return buildVideoMp4SpeedChangeArgs(inputName, outputName, targetFps, probe, overlays);
+    }
+  };
+
+  return commandPlan;
 }
 
 function buildVideoMp4SpeedChangeArgs(
   inputName: string,
   outputName: string,
   targetFps: number,
-  probe: VideoSourceProbe
+  probe: VideoSourceProbe,
+  overlays: VideoTelopOverlayInput[]
 ): string[] {
   const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+  const speedRatio = targetFps / probe.fps;
   const videoFilters = buildVideoSpeedChangeFilters(targetFps, trimDuration);
   const args = [
     "-y",
-    "-i", inputName,
-    "-filter_complex"
+    "-i", inputName
   ];
+  appendVideoTelopOverlayInputArgs(args, overlays);
+  args.push("-filter_complex");
+  const videoFilterGraph = buildVideoOverlayFilterGraph("[0:v:0]", videoFilters, overlays, "v");
 
   if (probe.hasAudio && state.audioMode === "keep") {
-    const speedRatio = targetFps / probe.fps;
     const audioFilters = [
       `atrim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
       "asetpts=PTS-STARTPTS",
       ...buildAtempoFilterChain(speedRatio)
     ];
-    args.push(`[0:v:0]${videoFilters.join(",")}[v];[0:a:0]${audioFilters.join(",")}[a]`);
+    args.push(`${videoFilterGraph};[0:a:0]${audioFilters.join(",")}[a]`);
     args.push("-map", "[v]", "-map", "[a]");
   } else {
-    args.push(`[0:v:0]${videoFilters.join(",")}[v]`);
+    args.push(videoFilterGraph);
     args.push("-map", "[v]", "-an");
   }
 
@@ -6252,23 +7201,31 @@ function buildVideoMp4SpeedChangeArgs(
 function buildVideoGifExportCommand(sourceFile: File): ExportCommandPlan {
   const inputName = `input.${getFileExtension(sourceFile.name)}`;
   const outputName = EXPORT_GIF_OUTPUT_NAME;
-  const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
-  const frameFilters = isFpsSpeedChangeActive()
-    ? buildVideoSpeedChangeFilters(clampFpsValue(state.fpsValue), trimDuration)
-    : [
-        `trim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
-        "setpts=PTS-STARTPTS",
-        ...buildVideoFilters()
-      ];
-  const filterGraph = `[0:v]${frameFilters.join(",")},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a[v]`;
-  const args = [
-    "-y",
-    "-i", inputName,
-    "-filter_complex", filterGraph,
-    "-map", "[v]",
-    "-loop", "0",
-    outputName
-  ];
+
+  if (isFpsSpeedChangeActive()) {
+    const commandPlan: ExportCommandPlan = {
+      sourceKind: "video",
+      format: "gif",
+      execution: "ffmpeg",
+      inputName,
+      outputName,
+      outputFileName: getExportFileName(sourceFile.name, "gif"),
+      outputMimeType: getExportMimeType("gif"),
+      saveDescription: getExportSaveDescription("gif"),
+      saveAccept: getExportSaveAccept("gif"),
+      args: [],
+      buildArgsWithVideoProbe: (probe) => {
+        const overlays = buildVideoTelopOverlayInputs(clampFpsValue(state.fpsValue) / probe.fps);
+        commandPlan.videoTelopOverlays = overlays;
+        commandPlan.progressDurationSeconds = getVideoSpeedChangedDuration(probe.fps, clampFpsValue(state.fpsValue));
+        return buildVideoGifExportArgs(inputName, outputName, probe, overlays);
+      }
+    };
+
+    return commandPlan;
+  }
+
+  const overlays = buildVideoTelopOverlayInputs(1);
 
   return {
     sourceKind: "video",
@@ -6280,14 +7237,48 @@ function buildVideoGifExportCommand(sourceFile: File): ExportCommandPlan {
     outputMimeType: getExportMimeType("gif"),
     saveDescription: getExportSaveDescription("gif"),
     saveAccept: getExportSaveAccept("gif"),
-    args
+    args: buildVideoGifExportArgs(inputName, outputName, undefined, overlays),
+    videoTelopOverlays: overlays
   };
+}
+
+function buildVideoGifExportArgs(
+  inputName: string,
+  outputName: string,
+  probe?: VideoSourceProbe,
+  overlays: VideoTelopOverlayInput[] = []
+): string[] {
+  const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
+  const frameFilters = isFpsSpeedChangeActive()
+    ? buildVideoSpeedChangeFilters(
+        clampFpsValue(state.fpsValue),
+        trimDuration
+      )
+    : [
+        `trim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
+        "setpts=PTS-STARTPTS",
+        ...buildVideoFilters()
+      ];
+  const videoFilterGraph = buildVideoOverlayFilterGraph("[0:v]", frameFilters, overlays, "telopv");
+  const filterGraph = `${videoFilterGraph};[telopv]split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a[v]`;
+  const args = [
+    "-y",
+    "-i", inputName
+  ];
+  appendVideoTelopOverlayInputArgs(args, overlays);
+  args.push(
+    "-filter_complex", filterGraph,
+    "-map", "[v]",
+    "-loop", "0",
+    outputName
+  );
+  return args;
 }
 
 function buildVideoWavExportCommand(sourceFile: File): ExportCommandPlan {
   const inputName = `input.${getFileExtension(sourceFile.name)}`;
 
-  return {
+  const commandPlan: ExportCommandPlan = {
     sourceKind: "video",
     format: "wav",
     execution: "ffmpeg",
@@ -6298,8 +7289,16 @@ function buildVideoWavExportCommand(sourceFile: File): ExportCommandPlan {
     saveDescription: getExportSaveDescription("wav"),
     saveAccept: getExportSaveAccept("wav"),
     args: [],
-    buildArgsWithVideoProbe: (probe) => buildVideoWavExportArgs(inputName, EXPORT_WAV_OUTPUT_NAME, probe)
+    buildArgsWithVideoProbe: (probe) => {
+      if (isFpsSpeedChangeActive()) {
+        commandPlan.progressDurationSeconds = getVideoSpeedChangedDuration(probe.fps, clampFpsValue(state.fpsValue));
+      }
+
+      return buildVideoWavExportArgs(inputName, EXPORT_WAV_OUTPUT_NAME, probe);
+    }
   };
+
+  return commandPlan;
 }
 
 function buildVideoWavExportArgs(
@@ -6343,21 +7342,33 @@ function buildVideoImageSequenceExportCommand(
   const trimDuration = Math.max(MIN_TRIM_SECONDS, state.trimEnd - state.trimStart);
   const args = [
     "-y",
-    "-i", inputName,
-    "-ss", formatFfmpegSeconds(state.trimStart),
-    "-t", formatFfmpegSeconds(trimDuration),
-    "-map", "0:v:0",
-    "-an",
-    "-dn",
-    "-sn"
+    "-i", inputName
   ];
-  const filters = buildVideoFilters();
+  const overlays = buildVideoTelopOverlayInputs(1);
+  const hasOverlays = overlays.length > 0;
+  const filters = hasOverlays ? buildVideoTrimmedFrameFilters(trimDuration) : buildVideoFilters();
 
-  if (filters.length > 0) {
-    args.push("-vf", filters.join(","));
+  appendVideoTelopOverlayInputArgs(args, overlays);
+
+  if (!hasOverlays) {
+    args.push("-ss", formatFfmpegSeconds(state.trimStart), "-t", formatFfmpegSeconds(trimDuration));
   }
 
-  args.push("-fps_mode", "passthrough");
+  if (hasOverlays) {
+    args.push(
+      "-filter_complex",
+      buildVideoOverlayFilterGraph("[0:v:0]", filters, overlays, "v"),
+      "-map", "[v]"
+    );
+  } else {
+    args.push("-map", "0:v:0");
+
+    if (filters.length > 0) {
+      args.push("-vf", filters.join(","));
+    }
+  }
+
+  args.push("-an", "-dn", "-sn", "-fps_mode", "passthrough");
 
   if (format === "jpeg") {
     args.push("-q:v", "2");
@@ -6376,7 +7387,8 @@ function buildVideoImageSequenceExportCommand(
     saveDescription: `${formatExportLabel(format)} image sequence`,
     saveAccept: getExportSaveAccept(format),
     args,
-    sequenceOutputDirectory: outputDirectory
+    sequenceOutputDirectory: outputDirectory,
+    videoTelopOverlays: overlays
   };
 }
 
@@ -6462,10 +7474,21 @@ function buildGifMp4ExportArgs(outputName: string): string[] {
   ];
 }
 
-function buildVideoSpeedChangeFilters(targetFps: number, trimDuration: number): string[] {
+function buildVideoSpeedChangeFilters(
+  targetFps: number,
+  trimDuration: number
+): string[] {
   return [
     `trim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
     `setpts=N/(${formatFfmpegNumber(targetFps)}*TB)`,
+    ...buildVideoFilters()
+  ];
+}
+
+function buildVideoTrimmedFrameFilters(trimDuration: number): string[] {
+  return [
+    `trim=start=${formatFfmpegSeconds(state.trimStart)}:duration=${formatFfmpegSeconds(trimDuration)}`,
+    "setpts=PTS-STARTPTS",
     ...buildVideoFilters()
   ];
 }
@@ -6489,6 +7512,10 @@ function buildAtempoFilterChain(speedRatio: number): string[] {
 }
 
 function buildVideoFilters(): string[] {
+  return getVideoFilterGeometry().filters;
+}
+
+function getVideoFilterGeometry(): { filters: string[]; outputWidth: number; outputHeight: number } {
   const filters: string[] = [];
   const crop = getExportCropRect();
   let baseWidth = state.width;
@@ -6508,7 +7535,105 @@ function buildVideoFilters(): string[] {
     filters.push(`scale=${outputWidth}:${outputHeight}`);
   }
 
-  return filters;
+  return {
+    filters,
+    outputWidth,
+    outputHeight
+  };
+}
+
+function buildVideoTelopOverlayInputs(timeScale: number): VideoTelopOverlayInput[] {
+  if (state.telops.length === 0) {
+    return [];
+  }
+
+  const { outputWidth, outputHeight } = getVideoFilterGeometry();
+
+  if (outputWidth <= 0 || outputHeight <= 0) {
+    return [];
+  }
+
+  const trimStart = state.trimStart;
+  const safeTimeScale = Number.isFinite(timeScale) && timeScale > 0 ? timeScale : 1;
+  const overlays: VideoTelopOverlayInput[] = [];
+
+  for (const [index, telop] of sortTelops(state.telops).entries()) {
+    const sourceStart = Math.max(telop.startTime, trimStart);
+    const sourceEnd = Math.min(telop.startTime + telop.duration, state.trimEnd);
+
+    if (sourceEnd <= sourceStart) {
+      continue;
+    }
+
+    const startTime = (sourceStart - trimStart) / safeTimeScale;
+    const endTime = (sourceEnd - trimStart) / safeTimeScale;
+
+    if (endTime <= startTime) {
+      continue;
+    }
+
+    overlays.push({
+      inputName: `telop-overlay-${String(index).padStart(3, "0")}.png`,
+      canvas: createVideoTelopOverlayCanvas(telop, outputWidth, outputHeight),
+      startTime,
+      endTime
+    });
+  }
+
+  return overlays;
+}
+
+function createVideoTelopOverlayCanvas(
+  telop: TelopItem,
+  outputWidth: number,
+  outputHeight: number
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Canvas is not available for telop overlay export.");
+  }
+
+  canvas.width = outputWidth;
+  canvas.height = outputHeight;
+  context.clearRect(0, 0, outputWidth, outputHeight);
+  drawSingleTelopToCanvas(context, canvas, telop);
+  return canvas;
+}
+
+function appendVideoTelopOverlayInputArgs(args: string[], overlays: VideoTelopOverlayInput[]): void {
+  for (const overlay of overlays) {
+    args.push("-loop", "1", "-i", overlay.inputName);
+  }
+}
+
+function buildVideoOverlayFilterGraph(
+  sourceLabel: string,
+  baseFilters: string[],
+  overlays: VideoTelopOverlayInput[],
+  outputLabel: string
+): string {
+  const chains: string[] = [];
+  const baseLabel = overlays.length > 0 ? "telopbase" : outputLabel;
+  const sourceFilters = baseFilters.length > 0 ? baseFilters.join(",") : "null";
+
+  chains.push(`${sourceLabel}${sourceFilters}[${baseLabel}]`);
+
+  let previousLabel = baseLabel;
+
+  for (let index = 0; index < overlays.length; index += 1) {
+    const overlay = overlays[index];
+    const nextLabel = index === overlays.length - 1 ? outputLabel : `telop${index}`;
+    const inputIndex = index + 1;
+
+    chains.push(
+      `[${previousLabel}][${inputIndex}:v]overlay=0:0:shortest=1:enable='between(t,${formatFfmpegSeconds(overlay.startTime)},${formatFfmpegSeconds(overlay.endTime)})'[${nextLabel}]`
+    );
+    previousLabel = nextLabel;
+  }
+
+  return chains.join(";");
 }
 
 function getExportCropRect(): { x: number; y: number; width: number; height: number } | null {
@@ -6533,10 +7658,11 @@ function getExportCropRect(): { x: number; y: number; width: number; height: num
   return { x, y, width, height };
 }
 
-function setActiveExportTab(tab: "settings" | "log"): void {
+function setActiveExportTab(tab: "settings" | "telop" | "log"): void {
   exportTabSwitchRevision += 1;
   activeExportTab = tab;
   renderExportUi();
+  renderTelopOverlay();
 }
 
 function showProcessingLogTab(): void {
@@ -7285,6 +8411,11 @@ function resetSource(): void {
   state.fpsMode = "original";
   state.fpsValue = FPS_DEFAULT;
   state.audioMode = "keep";
+  state.telops = [];
+  state.selectedTelopId = null;
+  state.telopDraftStartTime = 0;
+  telopNextOrder = 0;
+  resetTelopForm();
   state.compatibilityFallbackAllowed = false;
   state.thumbnailGenerationId += 1;
 
@@ -7305,6 +8436,7 @@ function resetSource(): void {
   renderTrimUi();
   renderCropUi();
   renderResizeUi();
+  renderTelopUi();
   renderExportUi();
   updatePlaybackUi();
 }
@@ -7319,6 +8451,7 @@ function resetVideoElement(): void {
   videoStage.classList.remove("is-loaded", "is-gif", "is-canvas-source", "fit-width", "fit-height");
   cropDragSession = null;
   cropBox.classList.remove("is-dragging");
+  telopOverlay.replaceChildren();
 
   if (gifContext) {
     gifContext.clearRect(0, 0, gifCanvas.width, gifCanvas.height);
